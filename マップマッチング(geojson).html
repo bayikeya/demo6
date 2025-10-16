@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<title>複数画像切替付きスポット案内（GeoJSON + マップマッチ + カルマン）</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<style>
+body { margin: 0; overflow: hidden; background-color: #000; color: white; font-family: sans-serif; text-align: center; }
+#camera { width: 100vw; height: 100vh; object-fit: cover; position: absolute; top: 0; left: 0; z-index: -1; }
+#info { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 8px; z-index: 1; white-space: pre-wrap; max-width: 45vw; }
+#image { position: absolute; bottom: 180px; left: 50%; transform: translateX(-50%); width: 300px; height: 300px; object-fit: contain; display: none; z-index: 1; background: black; }
+.btn { position: absolute; left: 50%; transform: translateX(-50%); background-color: #007BFF; color: white; border: none; padding: 10px 20px; font-size: 14px; border-radius: 8px; cursor: pointer; z-index: 2; display: none; }
+#patternBtn { bottom: 70px; }
+#nextBtn { bottom: 20px; }
+.img-nav { position: absolute; bottom: 260px; z-index: 2; font-size: 20px; background: rgba(0,0,0,0.5); color: white; border: none; padding: 5px 15px; cursor: pointer; border-radius: 6px; }
+#prevBtn { left: 10%; }
+#nextImgBtn { right: 10%; }
+#controls { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.6); padding: 8px; border-radius: 8px; z-index: 2; text-align:left; }
+#log { position: absolute; left: 10px; bottom: 10px; background: rgba(0,0,0,0.6); padding: 8px; border-radius: 8px; z-index: 2; max-width: 45vw; max-height: 30vh; overflow:auto; font-size:12px; }
+</style>
+</head>
+<body>
+
+<video id="camera" autoplay playsinline muted></video>
+<div id="info">位置情報取得中...</div>
+<img id="image" src="" alt="スポット画像" />
+<button class="btn" id="patternBtn" onclick="switchPattern()">English</button>
+<button class="btn" id="nextBtn" onclick="goToNextSpot()">このスポットは完了</button>
+<button class="img-nav" id="prevBtn" onclick="showPrevImage()" style="display:none;">←</button>
+<button class="img-nav" id="nextImgBtn" onclick="showNextImage()" style="display:none;">→</button>
+<audio id="audio" src=""></audio>
+
+<div id="controls">
+  <label><input type="checkbox" id="useKalman" checked> カルマンフィルタを使用</label><br/>
+  <label><input type="checkbox" id="useMapMatch" checked> マップマッチングを使用</label><br/>
+  <label>スナップ閾値(m): <input id="snapThreshold" type="number" value="8" style="width:60px"></label><br/>
+  <button onclick="clearLog()">ログクリア</button>
+</div>
+
+<div id="log"></div>
+
+<script>
+/* ------------------------
+   スポット定義（元コード）
+------------------------ */
+const spots = [
+  { name: "13号館前", lat: 35.69302425885399, lon: 140.0508424409975, radius: 0, images: ["image0.jpeg","image1.jpeg"], audio:{A:"spot1.ja.mp3",B:"spot1.en.mp3",C:"spot1.ch.mp3"}},
+  { name: "曲がり角右", lat:35.69283599175495, lon:140.05092001888113, radius: 10, images:["image3.jpeg","image11.jpeg"], audio:{A:"spot3,4.ja.mp3",B:"spot3,4.en.mp3",C:"spot3,4.ch.mp3"}},
+  { name: "曲がり角右１", lat:35.69286877921128, lon:140.05030279528978, radius: 10, images:["image4.jpeg","image13.jpeg"], audio:{A:"spot3,4.ja.mp3",B:"spot3,4.en.mp3",C:"spot3,4.ch.mp3"}},
+  { name: "曲がり角右２", lat:35.69334894066289, lon:140.05033682451656, radius: 10, images:["image5.jpeg","image14.jpeg"], audio:{A:"spot5,6.ja.mp3",B:"spot5,6.en.mp3",C:"spot5,6.ch.mp3"}},
+  { name: "曲がり角右３", lat:35.69331981781718, lon:140.05102244720183, radius: 10, images:["image6.jpeg","image15.jpeg"], audio:{A:"spot5,6.ja.mp3",B:"spot5,6.en.mp3",C:"spot5,6.ch.mp3"}},
+  { name: "目的地", lat:35.693014464267506, lon:140.0509410980045, radius: 10, images:["image7.jpeg","image16.jpeg"], audio:{A:"spot7,8.ja.mp3",B:"spot7,8.en.mp3",C:"spot7,8.ch.mp3"}}
+];
+
+let currentIndex=0, hasEnteredSpot=false, currentSpot=null, currentPattern="A", imageIndex=0;
+
+/* UI elements */
+const camera=document.getElementById("camera");
+const info=document.getElementById("info");
+const image=document.getElementById("image");
+const nextBtn=document.getElementById("nextBtn");
+const patternBtn=document.getElementById("patternBtn");
+const audio=document.getElementById("audio");
+const prevBtn=document.getElementById("prevBtn");
+const nextImgBtn=document.getElementById("nextImgBtn");
+const useKalmanEl=document.getElementById("useKalman");
+const useMapMatchEl=document.getElementById("useMapMatch");
+const snapThresholdEl=document.getElementById("snapThreshold");
+const logEl=document.getElementById("log");
+
+/* カメラ */
+navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}, audio:false})
+.then(stream=>camera.srcObject=stream)
+.catch(err=>console.log("カメラアクセス失敗:",err));
+
+/* ---------------------- 距離計算 / 平面近似 / カルマンフィルタ省略: 上記コードと同じ ---------------------- */
+/* ... ここに getDistance, latLonToMeters, metersToLatLon, SimpleKalman2D, numericMatMul などをそのままコピー ... */
+
+/* ----------------------
+   GeoJSON ルート読み込み
+---------------------- */
+let paths = []; // 空配列を初期化
+
+function geojsonToPaths(geojsonData) {
+  const pathsArray = [];
+  geojsonData.features.forEach(feature => {
+    if(feature.geometry.type==="LineString"){
+      const coords = feature.geometry.coordinates.map(c=>[c[1],c[0]]); // [lat,lon] に変換
+      pathsArray.push(coords);
+    }
+  });
+  return pathsArray;
+}
+
+// GeoJSON を fetch で読み込む
+fetch('demo.geojson')
+  .then(res=>res.json())
+  .then(data=>{
+    paths = geojsonToPaths(data);
+    log(`GeoJSON 読み込み完了: ${paths.length}本のルート`);
+  })
+  .catch(err=>console.error("GeoJSON読み込みエラー:",err));
+
+/* ----------------------
+   スポット判定 / UI 表示
+---------------------- */
+function checkProximity(lat, lon, rawSource){
+  if(currentIndex>=spots.length){ info.innerText="すべてのスポットを通過しました。"; hideAllUI(); return; }
+  const spot=spots[currentIndex];
+  const distance=getDistance(lat, lon, spot.lat, spot.lon);
+  const range=spot.radius||10;
+
+  info.innerText=
+    `現在地: 緯度 ${lat.toFixed(6)}, 経度 ${lon.toFixed(6)}\n`+
+    `次のスポット: ${spot.name}（${currentIndex+1} / ${spots.length}）\n`+
+    `残り距離: ${distance.toFixed(1)}m\n`+
+    `rawSrc: ${rawSource}`;
+
+  if(currentIndex>=1 && !hasEnteredSpot && distance<range){
+    showSpot(spot);
+  }
+}
+
+function showSpot(spot){
+  currentSpot=spot;
+  hasEnteredSpot=true;
+  imageIndex=0;
+  audio.src=spot.audio[currentPattern];
+  image.src=spot.images[imageIndex];
+  image.style.display="block";
+  nextBtn.style.display="block";
+  patternBtn.style.display="block";
+  prevBtn.style.display=spot.images.length>1?"block":"none";
+  nextImgBtn.style.display=spot.images.length>1?"block":"none";
+  audio.loop=true;
+  audio.play().catch(e=>console.log("自動再生に失敗:",e));
+  log(`スポット到達: ${spot.name}`);
+}
+
+function switchPattern(){
+  const patterns=["A","B","C"];
+  const idx=patterns.indexOf(currentPattern);
+  currentPattern=patterns[(idx+1)%patterns.length];
+  updatePatternButtonText();
+  if(currentSpot){
+    audio.pause();
+    audio.src=currentSpot.audio[currentPattern];
+    audio.play().catch(e=>console.log("自動再生に失敗:",e));
+  }
+}
+
+function showPrevImage(){ if(!currentSpot) return; imageIndex=(imageIndex-1+currentSpot.images.length)%currentSpot.images.length; image.src=currentSpot.images[imageIndex]; }
+function showNextImage(){ if(!currentSpot) return; imageIndex=(imageIndex+1)%currentSpot.images.length; image.src=currentSpot.images[imageIndex]; }
+
+function updatePatternButtonText(){ patternBtn.innerText=currentPattern==="A"?"English":currentPattern==="B"?"中文":"日本語"; }
+
+function goToNextSpot(){ audio.pause(); currentIndex++; hasEnteredSpot=false; currentSpot=null; hideAllUI(); }
+function hideAllUI(){ image.style.display="none"; nextBtn.style.display="none"; patternBtn.style.display="none"; prevBtn.style.display="none"; nextImgBtn.style.display="none"; }
+
+function log(msg){ const time=new Date().toLocaleTimeString(); logEl.innerText=`${time} ${msg}\n`+logEl.innerText; }
+function clearLog(){ logEl.innerText=""; }
+
+/* ----------------------
+   位置取得 + カルマン + マップマッチング
+---------------------- */
+const refLat=spots.length?spots[0].lat:35.693;
+const kf=new SimpleKalman2D(refLat);
+
+if("geolocation" in navigator){
+  navigator.geolocation.watchPosition(pos=>{
+    const rawLat=pos.coords.latitude;
+    const rawLon=pos.coords.longitude;
+    const ts=pos.timestamp||performance.now();
+
+    let filtered={lat:rawLat,lon:rawLon};
+    if(useKalmanEl.checked){ filtered=kf.process(rawLat,rawLon,ts); }
+
+    let matched=null;
+    if(useMapMatchEl.checked && paths.length>0){
+      matched=mapMatchPoint(filtered,paths,refLat);
+      const snapThreshold=Number(snapThresholdEl.value)||8;
+      if(matched && matched.dist<=snapThreshold){
+        if(useKalmanEl.checked){ kf.update(matched.lat,matched.lon,2.0); }
+        checkProximity(matched.lat,matched.lon,"matched");
+        log(`raw→filtered:${getDistance(rawLat,rawLon,filtered.lat,filtered.lon).toFixed(1)}m filtered→matched:${matched.dist.toFixed(1)}m`);
+      } else {
+        checkProximity(filtered.lat,filtered.lon,"filtered");
+        if(matched) log(`filtered→closest:${matched.dist.toFixed(1)}m (閾値:${snapThreshold}m)`); else log("paths未設定");
+      }
+    } else {
+      checkProximity(filtered.lat,filtered.lon,useKalmanEl.checked?"filtered":"raw");
+      if(!useMapMatchEl.checked) log("mapMatch 無効");
+    }
+  }, err=>info.innerText="位置情報の取得に失敗しました", {enableHighAccuracy:true,maximumAge:0,timeout:5000});
+}
+
+/* 初期表示 */
+window.onload=()=>{
+  showSpot(spots[0]);
+  updatePatternButtonText();
+  log("アプリ起動: Kalman="+(useKalmanEl.checked?"ON":"OFF")+" MapMatch="+(useMapMatchEl.checked?"ON":"OFF"));
+};
+
+</script>
+</body>
+</html>
