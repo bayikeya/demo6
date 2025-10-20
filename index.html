@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <title>複数画像切替付きスポット案内（IMU Fusion + Kalman + Road Snap）</title>
+  <title>複数画像切替付きスポット案内（IMU融合 + Kalman + Road Snap）</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     body { margin: 0; overflow: hidden; background-color: #000; color: white; font-family: sans-serif; text-align: center; }
@@ -15,9 +15,35 @@
     .img-nav { position: absolute; bottom: 260px; z-index: 3; font-size: 20px; background: rgba(0,0,0,0.5); color: white; border: none; padding: 5px 15px; cursor: pointer; border-radius: 6px; }
     #prevBtn { left: 10%; }
     #nextImgBtn { right: 10%; }
-    #controls { position: absolute; right: 10px; top: 10px; z-index: 3; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 8px; font-size: 13px; color: #fff; }
-    #controls label { display:block; margin-bottom:8px; }
-    #enableSensors { margin-top:6px; width:100%; padding:6px; border-radius:6px; border:none; background:#28a745; color:#fff; cursor:pointer; }
+
+    /* 起動時の全画面スタートオーバーレイ */
+    #startupOverlay {
+      position: absolute;
+      inset: 0;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      background: linear-gradient(180deg, rgba(0,0,0,0.6), rgba(0,0,0,0.8));
+      z-index: 10;
+      flex-direction: column;
+      gap: 16px;
+    }
+    #startBtn {
+      background: #d9534f;
+      color: white;
+      border: none;
+      padding: 18px 32px;
+      font-size: 20px;
+      border-radius: 12px;
+      cursor: pointer;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.4);
+    }
+    #startSub {
+      color: #ddd;
+      font-size: 14px;
+      max-width: 80%;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
@@ -31,12 +57,10 @@
 <button class="img-nav" id="nextImgBtn" onclick="showNextImage()" style="display:none;">→</button>
 <audio id="audio" src=""></audio>
 
-<div id="controls">
-  <label><input type="checkbox" id="snapToggle" checked /> 道路スナップを使う (GeoJSON + turf)</label>
-  <label>スナップ距離閾値 (m): <input type="number" id="snapThreshold" value="20" style="width: 70px;" /></label>
-  <label><input type="checkbox" id="kalmanToggle" checked /> Kalman フィルタを使う</label>
-  <button id="reloadRoadsBtn">roads.geojson を再読み込み</button>
-  <button id="enableSensors">センサー融合を有効化</button>
+<!-- 起動時ユーザー操作オーバーレイ -->
+<div id="startupOverlay" aria-hidden="false">
+  <button id="startBtn">避難開始</button>
+  <div id="startSub">画面をタップしてセンサーと音声再生を許可します。タップすると案内音声が自動再生されます。</div>
 </div>
 
 <!-- turf.js -->
@@ -68,18 +92,15 @@ const audio = document.getElementById("audio");
 const prevBtn = document.getElementById("prevBtn");
 const nextImgBtn = document.getElementById("nextImgBtn");
 
-const snapToggle = document.getElementById("snapToggle");
-const snapThresholdInput = document.getElementById("snapThreshold");
-const kalmanToggle = document.getElementById("kalmanToggle");
-const reloadRoadsBtn = document.getElementById("reloadRoadsBtn");
-const enableSensorsBtn = document.getElementById("enableSensors");
+const startupOverlay = document.getElementById("startupOverlay");
+const startBtn = document.getElementById("startBtn");
 
 /* ---------------- カメラ起動 ---------------- */
 navigator.mediaDevices?.getUserMedia({ video: { facingMode: "environment" }, audio: false })
   .then(stream => camera.srcObject = stream)
   .catch(err => console.log("カメラへのアクセスに失敗しました:", err));
 
-/* ---------------- Kalman フィルタ (1D) ---------------- */
+/* ---------------- Kalman フィルタ (1D) - 常時有効 ---------------- */
 class SimpleKalman {
   constructor(R = 0.00002, Q = 0.000001) {
     this.R = R; this.Q = Q;
@@ -108,24 +129,25 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-/* ---------------- GeoJSON 道路データ読み込み & スナップ ---------------- */
+/* ---------------- GeoJSON 道路データ読み込み & スナップ（閾値固定 10m） ---------------- */
 let roadsGeoJSON = null;
-const roadsUrl = "roads.geojson";
+const roadsUrl = "demo.geojson";
+const SNAP_THRESHOLD_METERS = 10;
+
 async function loadRoads() {
   try {
     const res = await fetch(roadsUrl);
     if (!res.ok) throw new Error("HTTP " + res.status);
-    roadsGeoJSON = await res.json();
-    console.log("roads.geojson 読み込み完了:", (roadsGeoJSON.features?.length || 0), "features");
+    demoGeoJSON = await res.json();
+    console.log("roads.geojson 読み込み完了:", (demoGeoJSON.features?.length || 0), "features");
   } catch (e) {
-    roadsGeoJSON = null;
+    demoGeoJSON = null;
     console.warn("roads.geojson の読み込みに失敗しました:", e);
   }
 }
-reloadRoadsBtn.onclick = loadRoads;
 loadRoads();
 
-function snapToRoad(lat, lon, thresholdMeters = 20) {
+function snapToRoad(lat, lon, thresholdMeters = SNAP_THRESHOLD_METERS) {
   if (!roadsGeoJSON) return { snapped: false, lat, lon, distanceToRoad: Infinity };
   const pt = turf.point([lon, lat]);
   let best = { distance: Infinity, point: null };
@@ -149,102 +171,85 @@ function snapToRoad(lat, lon, thresholdMeters = 20) {
   }
 }
 
-/* ---------------- IMUベースのデッドレコニング（センサー融合用） ---------------- */
-// odom: 累積変位（メートル） since last reference (lastRefLatLon)
+/* ---------------- IMUベースのデッドレコニング（センサー融合、自動はせず、ボタンで開始） ---------------- */
 let imuEnabled = false;
 let lastImuTs = null;
-let headingDeg = null; // 0..360 (compass)
+let headingDeg = null; // 0..360
 let velocityN = 0, velocityE = 0; // m/s
 let odom = { north: 0, east: 0 };
-let lastRef = null; // { lat, lon } 基準となるGPS（または融合後の参照）
-const MAX_IMU_INTEGRATION_TIME = 30000; // ms: 長時間の積分は不安定
+let lastRef = null;
+const MAX_IMU_INTEGRATION_TIME = 30000; // ms
 
 function enableIMU() {
-  if (imuEnabled) return;
-  // iOS permissions
-  const reqProms = [];
+  if (imuEnabled) return Promise.resolve();
+  // iOS の requestPermission はユーザーアクション（ここでは startBtn のクリック）から呼ぶ必要があるため、
+  // この関数はスタートボタンのハンドラ内から呼びます。
+  const permissions = [];
   if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
-    reqProms.push(DeviceMotionEvent.requestPermission().catch(e => { console.warn("DeviceMotion request failed", e); return "denied"; }));
+    permissions.push(DeviceMotionEvent.requestPermission());
   }
   if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
-    reqProms.push(DeviceOrientationEvent.requestPermission().catch(e => { console.warn("DeviceOrientation request failed", e); return "denied"; }));
+    permissions.push(DeviceOrientationEvent.requestPermission());
   }
-  Promise.all(reqProms).then(() => {
+
+  return Promise.all(permissions.map(p => p.catch(e => e))).then(results => {
+    // いずれにせよイベントリスナは登録
     window.addEventListener("devicemotion", onDeviceMotion, { passive: true });
     window.addEventListener("deviceorientation", onDeviceOrientation, { passive: true });
     imuEnabled = true;
-    enableSensorsBtn.textContent = "センサー融合 有効";
-    enableSensorsBtn.style.background = "#6c757d";
-  }).catch((e) => {
-    // If no permission API, still try to add listeners (Android / browsers that don't require explicit permission)
+    console.log("IMU enabled, permission results:", results);
+  }).catch(e => {
     window.addEventListener("devicemotion", onDeviceMotion, { passive: true });
     window.addEventListener("deviceorientation", onDeviceOrientation, { passive: true });
     imuEnabled = true;
-    enableSensorsBtn.textContent = "センサー融合 有効";
-    enableSensorsBtn.style.background = "#6c757d";
+    console.warn("IMU enable error, listeners registered anyway:", e);
   });
 }
 
-enableSensorsBtn.onclick = enableIMU;
-
-// DeviceOrientation: ヘディングを取得（alpha / webkitCompassHeading）
+// DeviceOrientation: ヘディング取得
 function onDeviceOrientation(e) {
-  // Prefer compass heading if available (webkit)
   if (typeof e.webkitCompassHeading === "number") {
     headingDeg = e.webkitCompassHeading;
   } else if (typeof e.alpha === "number") {
-    // alpha is rotation around Z axis (0..360) but depending on absolute and device orientation.
-    // When absolute === true, alpha approximates compass heading.
     headingDeg = e.alpha;
   } else {
     headingDeg = null;
   }
 }
 
-// DeviceMotion: 単純化した前方軸のみを用いた積分（影響を最小限に）。これはサンプル実装です。
+// DeviceMotion: 単純化した前方軸のみを用いた積分
 function onDeviceMotion(e) {
   const now = Date.now();
   if (!lastImuTs) lastImuTs = now;
-  const dt = Math.min(0.2, (now - lastImuTs) / 1000); // 秒、上限を設ける
+  const dt = Math.min(0.2, (now - lastImuTs) / 1000);
   lastImuTs = now;
 
-  // acc: m/s^2. Prefer acceleration (without gravity). Fallback to includingGravity.
   const acc = e.acceleration && (e.acceleration.x !== null || e.acceleration.y !== null) ? e.acceleration : e.accelerationIncludingGravity;
   if (!acc) return;
 
-  // Device axes mapping varies. Common heuristic:
-  // - acc.y: forward/back on many devices (positive when device top moves up)
-  // We use a simple heuristic: forwardAccel = -acc.y
   const forwardAccel = -(acc.y || 0);
 
-  // If heading available, project forward axis into North/East. Otherwise assume no rotation (can't orient).
   const h = (typeof headingDeg === "number") ? (headingDeg * Math.PI / 180) : null;
 
-  // Compute acceleration in earth-frame north/east (m/s^2)
   let aN = 0, aE = 0;
   if (h !== null) {
     aN = forwardAccel * Math.cos(h);
     aE = forwardAccel * Math.sin(h);
   } else {
-    // If heading not known, assume forward is north (fallback)
     aN = forwardAccel;
     aE = 0;
   }
 
-  // Integrate velocity and displacement (basic)
   velocityN += aN * dt;
   velocityE += aE * dt;
 
   const dispN = velocityN * dt + 0.5 * aN * dt * dt;
   const dispE = velocityE * dt + 0.5 * aE * dt * dt;
 
-  // Accumulate odometry
   odom.north += dispN;
   odom.east += dispE;
 
-  // Prevent runaway accumulation if no GPS for too long
   if (lastRef && (Date.now() - lastRef.ts) > MAX_IMU_INTEGRATION_TIME) {
-    // reset velocities to reduce drift after long time
     velocityN = 0; velocityE = 0;
     odom.north = 0; odom.east = 0;
     lastImuTs = null;
@@ -252,12 +257,9 @@ function onDeviceMotion(e) {
 }
 
 /* ---------------- 位置情報（GPS）とセンサー融合のロジック ---------------- */
-let lastGps = null; // { lat, lon, ts }
+let lastGps = null;
 const metersPerDegLat = 111320;
-
-function metersPerDegLonAtLat(lat) {
-  return 111320 * Math.cos(lat * Math.PI / 180);
-}
+function metersPerDegLonAtLat(lat) { return 111320 * Math.cos(lat * Math.PI / 180); }
 
 function onGpsPosition(pos) {
   const rawLat = pos.coords.latitude;
@@ -265,14 +267,18 @@ function onGpsPosition(pos) {
   const accuracy = pos.coords.accuracy || 30;
 
   if (!lastGps) {
-    // 初回: 基準を設定
     lastGps = { lat: rawLat, lon: rawLon, ts: Date.now() };
-    // reset odometry relative to this reference
     odom.north = 0; odom.east = 0;
     velocityN = 0; velocityE = 0;
     lastRef = { lat: lastGps.lat, lon: lastGps.lon, ts: lastGps.ts };
-    // Use possible snap & kalman
-    processFusedPosition(lastGps.lat, lastGps.lon, accuracy);
+    // Kalman に最初の値を食わせる
+    const kLat = kalmanLat.filter(lastRef.lat);
+    const kLon = kalmanLon.filter(lastRef.lon);
+    // snap
+    const snapRes = snapToRoad(kLat, kLon, SNAP_THRESHOLD_METERS);
+    const usedLat = snapRes.snapped ? snapRes.lat : kLat;
+    const usedLon = snapRes.snapped ? snapRes.lon : kLon;
+    checkProximity(usedLat, usedLon);
     return;
   }
 
@@ -282,34 +288,26 @@ function onGpsPosition(pos) {
   const predLon = lastRef.lon + (odom.east / mpdLon);
 
   // 2) 融合係数 beta: GPSの精度が悪ければIMUにより重みを置く
-  // accuracy (m): small => trust GPS; large => trust IMU more
   const beta = Math.min(0.9, (accuracy / 100)); // 0..0.9
   const fusedLat = rawLat * (1 - beta) + predLat * beta;
   const fusedLon = rawLon * (1 - beta) + predLon * beta;
 
-  // 3) リセット: 今回の融合結果を新しい参照にする（odometry をリセット）
+  // 3) リセット
   lastGps = { lat: fusedLat, lon: fusedLon, ts: Date.now() };
   lastRef = { lat: fusedLat, lon: fusedLon, ts: lastGps.ts };
   odom.north = 0; odom.east = 0;
   velocityN = 0; velocityE = 0;
 
-  // 4) optional: Kalman filtering
-  let usedLat = fusedLat, usedLon = fusedLon;
-  if (kalmanToggle.checked) {
-    usedLat = kalmanLat.filter(fusedLat);
-    usedLon = kalmanLon.filter(fusedLon);
-  }
+  // 4) Kalman（常時有効）
+  const usedLatKal = kalmanLat.filter(fusedLat);
+  const usedLonKal = kalmanLon.filter(fusedLon);
 
-  // 5) optional: snap to road
-  if (snapToggle.checked) {
-    const thr = Number(snapThresholdInput.value) || 20;
-    const snapRes = snapToRoad(usedLat, usedLon, thr);
-    if (snapRes.snapped) {
-      usedLat = snapRes.lat; usedLon = snapRes.lon;
-    }
-  }
+  // 5) snap（常時有効、閾値 10m）
+  const snapRes = snapToRoad(usedLatKal, usedLonKal, SNAP_THRESHOLD_METERS);
+  const usedLat = snapRes.snapped ? snapRes.lat : usedLatKal;
+  const usedLon = snapRes.snapped ? snapRes.lon : usedLonKal;
 
-  // 6) 最終的な位置で判定
+  // 6) 判定
   checkProximity(usedLat, usedLon);
 }
 
@@ -324,7 +322,6 @@ function checkProximity(lat, lon) {
   const distance = getDistance(lat, lon, spot.lat, spot.lon);
   const range = spot.radius || 10;
 
-  // シンプルなinfo表示（詳細な raw/filtered/snapped は表示しない）
   info.innerText =
     `現在地: 緯度 ${lat.toFixed(6)}, 経度 ${lon.toFixed(6)}\n` +
     `次のスポット: ${spot.name}（${currentIndex + 1} / ${spots.length}）\n` +
@@ -349,6 +346,7 @@ function showSpot(spot) {
   prevBtn.style.display = spot.images.length > 1 ? "block" : "none";
   nextImgBtn.style.display = spot.images.length > 1 ? "block" : "none";
 
+  // audio.play はスタートボタンのユーザー操作で解除済みのはずなので試みる
   audio.loop = true;
   audio.play().catch(e => console.log("自動再生に失敗:", e));
 }
@@ -398,7 +396,7 @@ function hideAllUI() {
   nextImgBtn.style.display = "none";
 }
 
-/* ---------------- 位置情報取得: watchPosition ---------------- */
+/* ---------------- 位置情報取得: watchPosition（Kalman + snap + IMU融合） ---------------- */
 if ("geolocation" in navigator) {
   const options = { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 };
   navigator.geolocation.watchPosition(
@@ -410,11 +408,51 @@ if ("geolocation" in navigator) {
   info.innerText = "このブラウザは位置情報に対応していません。";
 }
 
-/* ---------------- 起動時 ---------------- */
-window.onload = () => {
+/* ---------------- 起動時のスタートボタン処理 ---------------- */
+let userStarted = false;
+startBtn.addEventListener("click", async () => {
+  if (userStarted) return;
+  userStarted = true;
+
+  // Hide overlay immediately
+  startupOverlay.style.display = "none";
+  startupOverlay.setAttribute("aria-hidden", "true");
+
+  // Attempt to unlock AudioContext to maximize autoplay success
+  try {
+    // Some browsers require creating/resuming AudioContext in user gesture
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx) {
+      const ctx = new AudioCtx();
+      if (ctx.state === "suspended") {
+        await ctx.resume().catch(e => { /* ignore */ });
+      }
+    }
+  } catch (e) {
+    console.warn("AudioContext unlock failed:", e);
+  }
+
+  // Enable IMU (calls requestPermission on iOS if available) - must be called in user gesture
+  try {
+    await enableIMU();
+  } catch (e) {
+    console.warn("enableIMU failed on start:", e);
+  }
+
+  // Show first spot and attempt audio autoplay (allowed because this is user gesture)
+  try {
+    showSpot(spots[0]);
+  } catch (e) {
+    console.warn("showSpot(spots[0]) failed:", e);
+  }
+});
+
+/* ---------------- 起動時の最小セットアップ ---------------- */
+window.addEventListener("load", () => {
   updatePatternButtonText();
-  showSpot(spots[0]); // 起動時に最初のスポットを表示（必要なら削除）
-};
+  // Do NOT auto-enable IMU or auto-play audio here: we wait for user to press "避難開始".
+  // roads.geojson was loaded earlier by loadRoads().
+});
 </script>
 
 </body>
