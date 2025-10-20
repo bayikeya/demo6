@@ -1,228 +1,251 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8" />
-  <title>複数画像切替付きスポット案内（IMU融合 + Kalman + Road Snap） - 改良版</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset="utf-8" />
+  <title>スポット案内（IMU融合 + 4-state Kalman + ジャンプ除去 + Road Snap）</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    body { margin: 0; overflow: hidden; background-color: #000; color: white; font-family: sans-serif; text-align: center; }
-    #camera { width: 100vw; height: 100vh; object-fit: cover; position: absolute; top: 0; left: 0; z-index: -1; }
-    #info { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 8px; z-index: 2; white-space: pre-wrap; font-size: 14px; text-align: left; }
-    #image { position: absolute; bottom: 180px; left: 50%; transform: translateX(-50%); width: 300px; height: 300px; object-fit: contain; display: none; z-index: 2; background: black; }
-    .btn { position: absolute; left: 50%; transform: translateX(-50%); background-color: #007BFF; color: white; border: none; padding: 10px 20px; font-size: 14px; border-radius: 8px; cursor: pointer; z-index: 3; display: none; }
-    #patternBtn { bottom: 70px; }
-    #nextBtn { bottom: 20px; }
-    .img-nav { position: absolute; bottom: 260px; z-index: 3; font-size: 20px; background: rgba(0,0,0,0.5); color: white; border: none; padding: 5px 15px; cursor: pointer; border-radius: 6px; }
-    #prevBtn { left: 10%; }
-    #nextImgBtn { right: 10%; }
-    #startupOverlay {
-      position: absolute;
-      inset: 0;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      background: linear-gradient(180deg, rgba(0,0,0,0.6), rgba(0,0,0,0.8));
-      z-index: 10;
-      flex-direction: column;
-      gap: 16px;
-    }
-    #startBtn {
-      background: #d9534f;
-      color: white;
-      border: none;
-      padding: 18px 32px;
-      font-size: 20px;
-      border-radius: 12px;
-      cursor: pointer;
-      box-shadow: 0 6px 18px rgba(0,0,0,0.4);
-    }
-    #startSub { color: #ddd; font-size: 14px; max-width: 80%; text-align: center; }
+    body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif; background:#000; color:#fff; overflow:hidden; }
+    #camera { position: absolute; inset:0; width:100vw; height:100vh; object-fit:cover; z-index:0; filter:brightness(0.7); }
+    #info { position: absolute; left: 12px; top: 12px; background: rgba(0,0,0,0.5); padding:10px; border-radius:8px; z-index:5; font-size:13px; white-space:pre-wrap; max-width:40vw; }
+    #image { position:absolute; left:50%; transform:translateX(-50%); bottom:150px; width:320px; height:240px; object-fit:contain; z-index:6; display:none; border-radius:8px; background:#111; }
+    .btn { position:absolute; left:50%; transform:translateX(-50%); padding:10px 18px; border-radius:8px; border:none; background:#007bff; color:white; z-index:7; display:none; }
+    #patternBtn { bottom:110px; }
+    #nextBtn { bottom:60px; }
+    .imgNav { position:absolute; bottom:160px; z-index:7; padding:6px 12px; border-radius:6px; background:rgba(0,0,0,0.5); border:none; color:white; font-size:18px; }
+    #prevBtn { left:12%; display:none; }
+    #nextImgBtn { right:12%; display:none; }
+    #startupOverlay { position:absolute; inset:0; z-index:20; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:12px; background:linear-gradient(180deg, rgba(0,0,0,0.6), rgba(0,0,0,0.85)); }
+    #startBtn { background:#d9534f; color:white; padding:18px 28px; font-size:18px; border-radius:12px; border:none; }
+    #controls { position:absolute; right:12px; top:12px; z-index:8; display:flex; flex-direction:column; gap:8px; }
+    .small { padding:8px 10px; font-size:13px; border-radius:8px; border:none; background:rgba(255,255,255,0.06); color:#fff; }
+    #logBtn { background:#28a745; }
   </style>
 </head>
 <body>
 
 <video id="camera" autoplay playsinline muted></video>
-<div id="info">位置情報取得中...</div>
+
+<div id="info">初期化中...</div>
 <img id="image" src="" alt="スポット画像" />
 <button class="btn" id="patternBtn" onclick="switchPattern()">English</button>
 <button class="btn" id="nextBtn" onclick="goToNextSpot()">このスポットは完了</button>
-<button class="img-nav" id="prevBtn" onclick="showPrevImage()" style="display:none;">←</button>
-<button class="img-nav" id="nextImgBtn" onclick="showNextImage()" style="display:none;">→</button>
+<button class="imgNav" id="prevBtn" onclick="showPrevImage()">←</button>
+<button class="imgNav" id="nextImgBtn" onclick="showNextImage()">→</button>
 <audio id="audio" src=""></audio>
+
+<div id="controls">
+  <button class="small" id="toggleLog" onclick="toggleLogging()">ログ: OFF</button>
+  <button class="small" id="downloadLog" onclick="downloadLog()">ログをダウンロード</button>
+  <button class="small" id="resetKF" onclick="resetFilter()">KFリセット</button>
+</div>
 
 <div id="startupOverlay" aria-hidden="false">
   <button id="startBtn">避難開始</button>
-  <div id="startSub">画面をタップしてセンサーと音声再生を許可します。タップすると案内音声が自動再生されます。</div>
+  <div id="startSub" style="color:#ddd; max-width:80%; text-align:center; font-size:14px;">
+    タップしてセンサー（IMU）と音声再生を許可します。屋外での位置誤差が大きい場合は「ログをダウンロード」して解析できます。
+  </div>
 </div>
 
+<!-- turf.js (map matching helper) -->
 <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
 
 <script>
-/* ---------------- データ: スポット（例） ---------------- */
+/*
+  改良版 全体HTML:
+  - GPSジャンプ除去（歩行速度ベース）
+  - 4-state Kalman filter (north,east,vN,vE) : IMUは predict、GPSは update
+  - GPS accuracy を観測ノイズに使う
+  - 静止検出 (ZUPT) による速度抑制
+  - roads.geojson によるマップマッチ（snap）
+  - ログ出力（CSV）
+  - UI: 画像・音声切替、ログダウンロード
+*/
+
+/* ---------------- スポットデータ（例） ---------------- */
 const spots = [
-  { name: "13号館前", lat: 35.69302425885399, lon: 140.0508424409975, radius: 0, images: ["image0.jpeg", "image1.jpeg"], audio: { A: "spot1.ja.mp3", B: "spot1.en.mp3", C: "spot1.ch.mp3" } },
-  { name: "曲がり角右", lat:35.69283599175495,  lon:140.05092001888113, radius: 10, images: ["image3.jpeg", "image11.jpeg"], audio: { A: "spot3,4.ja.mp3", B: "spot3,4.en.mp3", C: "spot3,4.ch.mp3" } },
-  { name: "曲がり角右１", lat: 35.69286877921128,   lon: 140.05030279528978, radius: 10, images: ["image4.jpeg", "image13.jpeg"], audio: { A: "spot3,4.ja.mp3", B: "spot3,4.en.mp3", C: "spot3,4.ch.mp3" } },
-  { name: "曲がり角右２", lat: 35.69334894066289,  lon: 140.05033682451656, radius: 10, images: ["image5.jpeg", "image14.jpeg"], audio: { A: "spot5,6.ja.mp3", B: "spot5,6.en.mp3", C: "spot5,6.ch.mp3" } },
-  { name: "曲がり角右３", lat: 35.69331981781718,  lon: 140.05102244720183, radius: 10, images: ["image6.jpeg", "image15.jpeg"], audio: { A: "spot5,6.ja.mp3", B: "spot5,6.en.mp3", C: "spot5,6.ch.mp3" } },
-  { name: "目的地", lat: 35.693014464267506,  lon: 140.0509410980045, radius: 10, images: ["image7.jpeg", "image16.jpeg"], audio: { A: "spot7,8.ja.mp3", B: "spot7,8.en.mp3", C: "spot7,8.ch.mp3" } }
+  { name: "13号館前", lat: 35.69302425885399, lon: 140.0508424409975, radius: 8, images: ["image0.jpeg","image1.jpeg"], audio: { A:"spot1.ja.mp3", B:"spot1.en.mp3", C:"spot1.cn.mp3" } },
+  { name: "曲がり角右", lat: 35.69283599175495, lon: 140.05092001888113, radius: 10, images: ["image3.jpeg","image11.jpeg"], audio: { A:"spot2.ja.mp3", B:"spot2.en.mp3", C:"spot2.cn.mp3" } },
+  { name: "目的地", lat: 35.693014464267506, lon: 140.0509410980045, radius: 10, images: ["image7.jpeg","image16.jpeg"], audio: { A:"spot3.ja.mp3", B:"spot3.en.mp3", C:"spot3.cn.mp3" } }
 ];
 
-/* ---------------- UI / DOM ---------------- */
-let currentIndex = 0, hasEnteredSpot = false, currentSpot = null, currentPattern = "A", imageIndex = 0;
-const camera = document.getElementById("camera"), info = document.getElementById("info"), image = document.getElementById("image");
-const nextBtn = document.getElementById("nextBtn"), patternBtn = document.getElementById("patternBtn");
-const prevBtn = document.getElementById("prevBtn"), nextImgBtn = document.getElementById("nextImgBtn");
+/* ---------------- DOM ---------------- */
+const camera = document.getElementById("camera");
+const info = document.getElementById("info");
+const image = document.getElementById("image");
+const patternBtn = document.getElementById("patternBtn");
+const nextBtn = document.getElementById("nextBtn");
+const prevBtn = document.getElementById("prevBtn");
+const nextImgBtn = document.getElementById("nextImgBtn");
 const audioEl = document.getElementById("audio");
-const startupOverlay = document.getElementById("startupOverlay"), startBtn = document.getElementById("startBtn");
+const startupOverlay = document.getElementById("startupOverlay");
+const startBtn = document.getElementById("startBtn");
+const toggleLogBtn = document.getElementById("toggleLog");
+const downloadLogBtn = document.getElementById("downloadLog");
 
-/* ---------------- カメラ起動（変わらず） ---------------- */
+let currentIndex = 0;
+let currentSpot = null;
+let hasEnteredSpot = false;
+let currentPattern = "A";
+let imageIndex = 0;
+
+/* ---------------- カメラ起動 ---------------- */
 navigator.mediaDevices?.getUserMedia({ video: { facingMode: "environment" }, audio: false })
-  .then(stream => camera.srcObject = stream)
-  .catch(err => console.log("カメラへのアクセスに失敗しました:", err));
+  .then(s => camera.srcObject = s)
+  .catch(e => console.warn("カメラ取得失敗:", e));
 
-/* ---------------- 道路データ読み込み ---------------- */
+/* ---------------- roads.geojson 読込 ---------------- */
 let roadsGeoJSON = null;
 const roadsUrl = "demo.geojson";
-const SNAP_THRESHOLD_METERS = 10;
+const SNAP_THRESHOLD_BASE = 10; // m
 async function loadRoads() {
   try {
-    const res = await fetch(roadsUrl);
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    roadsGeoJSON = await res.json();
-    console.log("roads.geojson 読み込み完了:", (roadsGeoJSON.features?.length || 0), "features");
+    const r = await fetch(roadsUrl);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    roadsGeoJSON = await r.json();
+    console.log("roads loaded:", roadsGeoJSON.features?.length || 0);
   } catch (e) {
+    console.warn("roads load failed:", e);
     roadsGeoJSON = null;
-    console.warn("roads.geojson の読み込みに失敗しました:", e);
   }
 }
 loadRoads();
 
 function snapToRoad(lat, lon, thresholdMeters) {
-  if (!roadsGeoJSON) return { snapped: false, lat, lon, distanceToRoad: Infinity };
+  if (!roadsGeoJSON) return { snapped:false, lat, lon, distanceToRoad: Infinity };
   const pt = turf.point([lon, lat]);
-  let best = { distance: Infinity, point: null };
-  for (const feature of roadsGeoJSON.features) {
-    if (!feature.geometry) continue;
+  let best = { distance: Infinity, point: null, feature:null };
+  for (const f of roadsGeoJSON.features) {
+    if (!f.geometry) continue;
     try {
-      const snapped = turf.nearestPointOnLine(feature, pt, { units: "meters" });
-      const d = snapped.properties?.dist ?? snapped.properties?.distance ?? (turf.distance(pt, snapped, { units: "kilometers" }) * 1000);
+      const snapped = turf.nearestPointOnLine(f, pt, { units: "meters" });
+      const d = snapped.properties?.dist ?? snapped.properties?.distance ?? (turf.distance(pt, snapped, { units: "kilometers" })*1000);
       if (typeof d === "number" && d < best.distance) {
-        best.distance = d; best.point = snapped;
+        best.distance = d;
+        best.point = snapped;
+        best.feature = f;
       }
-    } catch (e) {
-      console.warn("nearestPointOnLine failed for feature:", e);
-    }
+    } catch(e){ /* continue */ }
   }
   if (best.point && best.distance <= thresholdMeters) {
-    const [snLon, snLat] = best.point.geometry.coordinates;
-    return { snapped: true, lat: snLat, lon: snLon, distanceToRoad: best.distance };
+    const [lon2, lat2] = best.point.geometry.coordinates;
+    return { snapped:true, lat:lat2, lon:lon2, distanceToRoad:best.distance, feature:best.feature };
   } else {
-    return { snapped: false, lat, lon, distanceToRoad: best.distance };
+    return { snapped:false, lat, lon, distanceToRoad:best.distance };
   }
 }
 
-/* ---------------- 座標変換（緯度経度 ↔ メートル） ---------------- */
+/* ---------------- 緯度経度 <-> 局所メートル変換 ---------------- */
 let originLat = null, originLon = null;
 const metersPerDegLat = 111320;
-function metersPerDegLonAtLat(lat) { return 111320 * Math.cos(lat * Math.PI / 180); }
-function latLonToLocalMeters(lat, lon) {
-  if (originLat === null) {
-    originLat = lat; originLon = lon;
-  }
+function metersPerDegLonAtLat(lat){ return 111320 * Math.cos(lat * Math.PI / 180); }
+function latLonToLocal(lat, lon) {
+  if (originLat === null) { originLat = lat; originLon = lon; }
   const dy = (lat - originLat) * metersPerDegLat;
   const dx = (lon - originLon) * metersPerDegLonAtLat((lat+originLat)/2);
-  return { x: dx, y: dy }; // x: east, y: north
+  return { x: dx, y: dy }; // x:east, y:north
 }
-function localMetersToLatLon(y, x) {
-  // inputs: y:north (m), x:east (m)
+function localToLatLon(y, x) {
   const lat = originLat + (y / metersPerDegLat);
   const lon = originLon + (x / metersPerDegLonAtLat(originLat));
   return { lat, lon };
 }
 
-/* ---------------- 4状態カルマンフィルタ（N, E, vN, vE） ---------------- */
+/* ---------------- 4-state Kalman Filter (n,e,vN,vE) - 軽量実装 ---------------- */
 class KF4 {
   constructor() {
-    this.x = mathZeros(4); // [n, e, vN, vE] in meters/ m/s
-    this.P = identity(4, 4, 1e1);
-    this.Q = identity(4,4, 0.1); // process noise, tune
+    this.x = [0,0,0,0]; // n, e, vN, vE (meters, meters, m/s, m/s)
+    this.P = eye(4, 1e2);
+    this.Qbase = eye(4, 0.5); // process noise base
     this.lastTs = null;
   }
-  predict(ax, ay, dt) {
-    if (dt <= 0) return;
-    // State transition:
+  predict(aN, aE, dt) {
+    if (!dt || dt <= 0) return;
+    // state transition
     // n' = n + vN*dt + 0.5*aN*dt^2
     // e' = e + vE*dt + 0.5*aE*dt^2
     // vN' = vN + aN*dt
     // vE' = vE + aE*dt
+    const n = this.x[0] + this.x[2]*dt + 0.5*aN*dt*dt;
+    const e = this.x[1] + this.x[3]*dt + 0.5*aE*dt*dt;
+    const vN = this.x[2] + aN*dt;
+    const vE = this.x[3] + aE*dt;
+    this.x = [n,e,vN,vE];
+
+    // linearized F
     const F = [
       [1,0,dt,0],
       [0,1,0,dt],
       [0,0,1,0],
       [0,0,0,1]
     ];
-    const Bu = [0.5*ax*dt*dt, 0.5*ay*dt*dt, ax*dt, ay*dt];
-    this.x = addVec(matMulVec(F, this.x), Bu);
-    // P = F P F^T + Q (simple)
-    this.P = addMat(matMul(F, matMul(this.P, transpose(F))), scalarMat(this.Q, dt));
+    // process noise scaled by dt
+    const Q = mulScalar(this.Qbase, dt);
+    this.P = addMat(mulMat(F, mulMat(this.P, transpose(F))), Q);
   }
-  updatePos(zx, zy, Rpos) {
-    // Measurement z = [n, e]
-    const H = [
-      [1,0,0,0],
-      [0,1,0,0]
-    ];
-    const R = [[Rpos*Rpos, 0],[0, Rpos*Rpos]];
-    const y = subVec([zx, zy], matMulVec(H, this.x));
-    const S = addMat(matMul(H, matMul(this.P, transpose(H))), R);
-    const K = matMul(this.P, matMul(transpose(H), inv2(S)));
-    this.x = addVec(this.x, matMulVec(K, y));
-    const I = identity(4,4,1);
-    this.P = matMul(subMat(I, matMul(K, H)), this.P);
+  updatePos(n_meas, e_meas, Rpos) {
+    // H = [[1,0,0,0],[0,1,0,0]]
+    const H = [[1,0,0,0],[0,1,0,0]];
+    const z = [n_meas, e_meas];
+    const R = [[Rpos*Rpos,0],[0,Rpos*Rpos]];
+    // y = z - Hx
+    const Hx = matVec(H, this.x);
+    const y = [z[0]-Hx[0], z[1]-Hx[1]];
+    // S = H P H^T + R
+    const S = addMat(mulMat(H, mulMat(this.P, transpose(H))), R);
+    const K = mulMat(this.P, mulMat(transpose(H), inv2(S)));
+    const K_vec = matVec(K, y); // 4x1
+    this.x = addVec(this.x, K_vec);
+    const I = eye(4,1);
+    const KH = mulMat(K, H);
+    this.P = mulMat(subMat(I, KH), this.P);
   }
-  getState() { return this.x.slice(); }
-  resetTo(x0, P0 = null) { this.x = x0.slice(); this.P = P0 ? P0 : identity(4,4,1e1); }
+  getState(){ return this.x.slice(); }
+  setState(x,P=null){ this.x = x.slice(); this.P = P ? P : eye(4,1e2); }
+  reset(){ this.x = [0,0,0,0]; this.P = eye(4,1e2); this.lastTs = null; originLat = originLon = null; }
 }
 
-/* -------------- 軽量行列ユーティリティ（最小限） -------------- */
-function identity(n,m,val=1){ const a=[]; for(let i=0;i<n;i++){a[i]=Array(m).fill(0); a[i][i]=val;} return a; }
-function mathZeros(n){ return Array(n).fill(0); }
-function scalarMat(mat, s){ return mat.map(row=>row.map(v=>v*s)); }
-function matMul(A,B){ const r=A.length, c=B[0].length, mid=A[0].length; const out=[]; for(let i=0;i<r;i++){ out[i]=Array(c).fill(0); for(let k=0;k<mid;k++){ for(let j=0;j<c;j++){ out[i][j]+=A[i][k]*B[k][j]; } } } return out;}
-function matMulVec(A,v){ const r=A.length, c=v.length; const out=Array(r).fill(0); for(let i=0;i<r;i++){ for(let j=0;j<c;j++){ out[i]+=A[i][j]*v[j]; } } return out; }
-function transpose(A){ return A[0].map((_,i)=>A.map(row=>row[i])); }
-function addMat(A,B){ return A.map((row,i)=>row.map((v,j)=>v+(B[i][j]||0))); }
-function subMat(A,B){ return A.map((row,i)=>row.map((v,j)=>v-(B[i][j]||0))); }
-function addVec(a,b){ return a.map((v,i)=>v+(b[i]||0)); }
-function subVec(a,b){ return a.map((v,i)=>v-(b[i]||0)); }
-function inv2(M){ // inverse of 2x2 matrix
+/* --- matrix helpers (minimal) --- */
+function eye(n, diag=1){ const A=[]; for(let i=0;i<n;i++){ A[i]=Array(n).fill(0); A[i][i]=diag; } return A; }
+function transpose(A){ return A[0].map((_,i)=>A.map(r=>r[i])); }
+function mulMat(A,B){ const r=A.length,c=B[0].length,m=A[0].length; const C=[]; for(let i=0;i<r;i++){ C[i]=Array(c).fill(0); for(let k=0;k<m;k++){ for(let j=0;j<c;j++){ C[i][j]+=A[i][k]*B[k][j]; } } } return C; }
+function matVec(A,v){ const r=A.length,c=v.length; const out=Array(r).fill(0); for(let i=0;i<r;i++){ for(let j=0;j<c;j++){ out[i]+=A[i][j]*v[j]; } } return out; }
+function addMat(A,B){ return A.map((row,i)=>row.map((v,j)=>v + (B[i][j]||0))); }
+function subMat(A,B){ return A.map((row,i)=>row.map((v,j)=>v - (B[i][j]||0))); }
+function addVec(a,b){ return a.map((v,i)=>v + (b[i]||0)); }
+function mulScalar(A,s){ return A.map(row=>row.map(v=>v*s)); }
+function inv2(M){ // inverse 2x2
   const a=M[0][0], b=M[0][1], c=M[1][0], d=M[1][1];
-  const det=a*d-b*c; if(Math.abs(det)<1e-9) return [[1e9,0],[0,1e9]];
-  const id=1/det; return [[d*id, -b*id],[-c*id, a*id]];
+  const det = a*d - b*c;
+  if (Math.abs(det) < 1e-9) return [[1e9,0],[0,1e9]];
+  const id = 1/det;
+  return [[ d*id, -b*id], [-c*id, a*id]];
 }
-function matMulScalar(A,s){ return A.map(r=>r.map(v=>v*s)); }
 
-/* ---------------- 状態とIMU/GPSフュージョン ---------------- */
+/* ---------------- フィルタとIMU ---------------- */
 const kf = new KF4();
-let imuEnabled = false, lastImuTs = null, headingDeg = null;
-let originSet = false, lastGps = null;
-let userStarted = false;
-const MAX_IMU_INTEGRATION_TIME = 20000; // ms
+let imuEnabled = false;
+let lastImuTs = null;
+let headingDeg = null;
+let lastGps = null; // {lat,lon,ts,accuracy}
+const MAX_IMU_INTEGRATION_MS = 20000; // 長時間は信用しない
 
+/* IMU の有効化 (iOS の permission を考慮) */
 function enableIMU() {
   if (imuEnabled) return Promise.resolve();
-  const permissions = [];
-  if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") permissions.push(DeviceMotionEvent.requestPermission());
-  if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") permissions.push(DeviceOrientationEvent.requestPermission());
-  return Promise.all(permissions.map(p=>p.catch(e=>e))).then(()=> {
-    window.addEventListener("devicemotion", onDeviceMotion, { passive: true });
-    window.addEventListener("deviceorientation", onDeviceOrientation, { passive: true });
+  const perms = [];
+  if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") perms.push(DeviceMotionEvent.requestPermission());
+  if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") perms.push(DeviceOrientationEvent.requestPermission());
+  return Promise.all(perms.map(p=>p.catch(e=>e))).then(()=> {
+    window.addEventListener("devicemotion", onDeviceMotion, { passive:true });
+    window.addEventListener("deviceorientation", onDeviceOrientation, { passive:true });
     imuEnabled = true;
-  }).catch(()=> {
-    window.addEventListener("devicemotion", onDeviceMotion, { passive: true });
-    window.addEventListener("deviceorientation", onDeviceOrientation, { passive: true });
+    console.log("IMU enabled");
+  }).catch(e => {
+    window.addEventListener("devicemotion", onDeviceMotion, { passive:true });
+    window.addEventListener("deviceorientation", onDeviceOrientation, { passive:true });
     imuEnabled = true;
+    console.warn("IMU enable error, listeners attached anyway:", e);
   });
 }
 
@@ -235,139 +258,258 @@ function onDeviceOrientation(e){
 let stationaryCounter = 0;
 function onDeviceMotion(e){
   const now = Date.now();
-  if (!kfsafeTime(now)) { lastImuTs = now; return; }
   if (!lastImuTs) lastImuTs = now;
-  let dt = Math.min(0.2, (now - lastImuTs)/1000);
+  const dt = Math.min(0.2, (now - lastImuTs)/1000);
   lastImuTs = now;
+  if (!dt || dt <= 0) return;
 
   const acc = e.acceleration && (e.acceleration.x !== null || e.acceleration.y !== null) ? e.acceleration : e.accelerationIncludingGravity;
   if (!acc) return;
-  // 前方軸としての y を使用（既存の簡易的扱い）
-  const forwardAccel = -(acc.y || 0);
-  const h = (typeof headingDeg === "number") ? (headingDeg * Math.PI/180) : null;
-  let aN=0, aE=0;
+
+  const forwardAccel = -(acc.y || 0); // 簡易: デバイスのy軸を前方と仮定
+  const h = (typeof headingDeg === "number") ? (headingDeg * Math.PI / 180) : null;
+  let aN = 0, aE = 0;
   if (h !== null) { aN = forwardAccel * Math.cos(h); aE = forwardAccel * Math.sin(h); }
   else { aN = forwardAccel; aE = 0; }
-  // 静止判定（accがほぼ0なら stationary）
+
+  // 静止検出
   const accNorm = Math.sqrt((acc.x||0)**2 + (acc.y||0)**2 + (acc.z||0)**2);
-  if (accNorm < 0.2) { stationaryCounter++; } else { stationaryCounter = 0; }
-  if (stationaryCounter > 5) {
-    // 静止なら速度をゼロに寄せる（drift抑制）
+  if (accNorm < 0.18) stationaryCounter++; else stationaryCounter = 0;
+  if (stationaryCounter > 6) {
+    // ZUPT: 速度を0に寄せる(歩行での短時間停止防止)
     kf.x[2] = 0; kf.x[3] = 0;
   }
-  // predict step (注意: x,y表記は east,north => kf uses [n,e,vN,vE])
-  // we pass ax=aN (north), ay=aE (east)
+
   kf.predict(aN, aE, dt);
-  // safety: if IMU integrated too long without GPS, reduce cov
-  const nowSinceGps = lastGps ? (Date.now()-lastGps.ts) : Infinity;
-  if (nowSinceGps > MAX_IMU_INTEGRATION_TIME) {
-    // reduce trust in velocity slowly
-    kf.P[2][2] += 0.5;
-    kf.P[3][3] += 0.5;
+  // IMUを長時間積分した場合はcovを増やして信頼を下げる
+  if (lastGps && (Date.now() - lastGps.ts) > MAX_IMU_INTEGRATION_MS) {
+    kf.P[2][2] += 1.0;
+    kf.P[3][3] += 1.0;
+  }
+
+  // ロギング用のIMUデータ保存
+  if (loggingEnabled) {
+    pushLogSample({ type:"imu", t:Date.now(), accX:acc.x, accY:acc.y, accZ:acc.z, aN, aE });
   }
 }
 
-/* ---------------- GPSハンドラ：GPSが来たら補正（観測ノイズにaccuracyを使用） ---------------- */
+/* ---------------- GPS ハンドラ（ジャンプ除去、fusion） ---------------- */
+const MAX_WALK_SPEED = 3.0; // m/s（歩行: ~1.5-2.0。状況によって調整）
 function onGpsPosition(pos) {
-  const rawLat = pos.coords.latitude, rawLon = pos.coords.longitude;
-  const accuracy = pos.coords.accuracy || 30; // meters
+  const rawLat = pos.coords.latitude;
+  const rawLon = pos.coords.longitude;
+  const accuracy = pos.coords.accuracy || 30;
+  const ts = pos.timestamp || Date.now();
 
-  if (!originSet) {
-    originLat = rawLat; originLon = rawLon; originSet = true;
+  // 初回 origin 設定
+  if (originLat === null) { originLat = rawLat; originLon = rawLon; }
+
+  // ジャンプ除去: 前回GPSとの比較
+  if (lastGps) {
+    const dt = Math.max(0.001, (ts - lastGps.ts) / 1000.0);
+    const jumpDist = haversine(rawLat, rawLon, lastGps.lat, lastGps.lon);
+    const allowed = MAX_WALK_SPEED * dt + Math.max(3, accuracy, lastGps.accuracy);
+    if (jumpDist > allowed * 2.5) {
+      console.warn("GPS spike rejected:", jumpDist.toFixed(1), "m dt=", dt.toFixed(2), "s acc=", accuracy.toFixed(1));
+      // ログ
+      if (loggingEnabled) pushLogSample({ type:"gps_reject", t:ts, lat:rawLat, lon:rawLon, acc:accuracy, jumpDist });
+      return; // 捨てる
+    }
   }
-  const local = latLonToLocalMeters(rawLat, rawLon); // {x:east, y:north}
-  // GPS を観測としてカルマン更新（観測ノイズは accuracy に依存）
-  kf.updatePos(local.y, local.x, Math.max(accuracy, 3)); // Rpos = accuracy（下限3m）
-  lastGps = { lat: rawLat, lon: rawLon, ts: Date.now(), accuracy };
 
-  // map-matching: スナップを試みる（閾値は観測精度に比例させる）
-  const snapThreshold = Math.max(5, Math.min(20, accuracy*1.5));
-  const state = kf.getState(); // [n,e,vN,vE]
-  const curLatLon = localMetersToLatLon(state[0], state[1]);
-  const snapRes = snapToRoad(curLatLon.lat, curLatLon.lon, snapThreshold);
+  // メジャー: 局所座標に変換
+  const local = latLonToLocal(rawLat, rawLon); // x:east, y:north
+
+  // 精度に応じて観測ノイズ (下限を設定)
+  const Rpos = Math.max(3, accuracy);
+
+  // カルマンに更新 (位置観測)
+  kf.updatePos(local.y, local.x, Rpos);
+
+  // マップマッチ: threshold を精度依存に
+  const snapThresh = Math.max(5, Math.min(25, accuracy * 1.5));
+  const state = kf.getState();
+  const stLatLon = localToLatLon(state[0], state[1]);
+  const snapRes = snapToRoad(stLatLon.lat, stLatLon.lon, snapThresh);
   if (snapRes.snapped) {
-    // snap された座標でカルマンを強く修正（位置のみ）
-    const snapLocal = latLonToLocalMeters(snapRes.lat, snapRes.lon);
-    kf.updatePos(snapLocal.y, snapLocal.x, Math.max(3, accuracy*0.5));
+    const sLocal = latLonToLocal(snapRes.lat, snapRes.lon);
+    // スナップ時は強めに位置更新（小さいR）
+    kf.updatePos(sLocal.y, sLocal.x, Math.max(2, accuracy*0.5));
   }
 
-  // 表示更新・スポット判定（local->latlon）
-  const usedState = kf.getState();
-  const usedLatLon = localMetersToLatLon(usedState[0], usedState[1]);
-  checkProximity(usedLatLon.lat, usedLatLon.lon);
+  lastGps = { lat: rawLat, lon: rawLon, ts, accuracy };
+
+  // 表示更新
+  const s = kf.getState(); // [n,e,vN,vE]
+  const usedLatLon = localToLatLon(s[0], s[1]);
+  updateInfo(usedLatLon.lat, usedLatLon.lon, accuracy);
+
+  // ログ
+  if (loggingEnabled) {
+    pushLogSample({ type:"gps", t:ts, lat:rawLat, lon:rawLon, acc:accuracy, usedLat:usedLatLon.lat, usedLon:usedLatLon.lon, vN:s[2], vE:s[3] });
+  }
 }
 
-/* ---------------- スポット判定（表示） ---------------- */
-function getDistance(lat1, lon1, lat2, lon2) {
+/* ---------------- 距離計算 (haversine) ---------------- */
+function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371000;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLon/2)**2;
+  const dLat = (lat2 - lat1) * Math.PI/180;
+  const dLon = (lon2 - lon1) * Math.PI/180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   return R * c;
 }
 
-function checkProximity(lat, lon) {
+/* ---------------- UI 表示・スポット判定 ---------------- */
+function updateInfo(lat, lon, accuracy) {
   if (currentIndex >= spots.length) {
-    info.innerText = "すべてのスポットを通過しました。";
+    info.innerText = `すべてのスポットを通過しました。`;
     hideAllUI();
     return;
   }
   const spot = spots[currentIndex];
-  const distance = getDistance(lat, lon, spot.lat, spot.lon);
+  const dist = haversine(lat, lon, spot.lat, spot.lon);
   const range = spot.radius || 10;
   info.innerText =
-    `現在地: 緯度 ${lat.toFixed(6)}, 経度 ${lon.toFixed(6)}\n` +
-    `次のスポット: ${spot.name}（${currentIndex + 1} / ${spots.length}）\n` +
-    `残り距離: ${distance.toFixed(1)}m\n` +
-    `GPS精度: ${lastGps ? lastGps.accuracy.toFixed(1) + "m" : "―"}\n`;
-  if (!hasEnteredSpot && distance < range) showSpot(spot);
+    `推定現在地: 緯度 ${lat.toFixed(6)}, 経度 ${lon.toFixed(6)}\n` +
+    `次のスポット: ${spot.name} (${currentIndex+1}/${spots.length})\n` +
+    `残距離: ${dist.toFixed(1)} m  精度(GPS): ${accuracy ? accuracy.toFixed(1) + " m" : "―"}\n` +
+    `KF速度: ${Math.hypot(kf.x[2], kf.x[3]).toFixed(2)} m/s`;
+  if (!hasEnteredSpot && dist < range) {
+    showSpot(spot);
+  }
 }
 
-/* ---------------- スポット表示 / 画像 / 音声（既存ロジックを再利用） ---------------- */
 function showSpot(spot) {
   currentSpot = spot; hasEnteredSpot = true; imageIndex = 0;
   audioEl.src = spot.audio[currentPattern];
   image.src = spot.images[imageIndex];
-  image.style.display = "block"; nextBtn.style.display = "block"; patternBtn.style.display = "block";
+  image.style.display = "block";
+  nextBtn.style.display = "block";
+  patternBtn.style.display = "block";
   prevBtn.style.display = spot.images.length > 1 ? "block" : "none";
   nextImgBtn.style.display = spot.images.length > 1 ? "block" : "none";
-  audioEl.loop = true; audioEl.play().catch(e=>console.log("自動再生に失敗:", e));
+  audioEl.loop = true;
+  audioEl.play().catch(e => console.log("audio play fail:", e));
 }
-function switchPattern(){ const patterns=["A","B","C"]; const i=patterns.indexOf(currentPattern); currentPattern=patterns[(i+1)%patterns.length]; updatePatternButtonText(); if(currentSpot){ audioEl.pause(); audioEl.src=currentSpot.audio[currentPattern]; audioEl.play().catch(e=>{}); } }
-function updatePatternButtonText(){ let label=""; switch(currentPattern){case "A":label="English";break;case "B":label="中文";break;case "C":label="日本語";break;} patternBtn.innerText=label; }
-function showPrevImage(){ if(!currentSpot) return; imageIndex=(imageIndex-1+currentSpot.images.length)%currentSpot.images.length; image.src=currentSpot.images[imageIndex]; }
-function showNextImage(){ if(!currentSpot) return; imageIndex=(imageIndex+1)%currentSpot.images.length; image.src=currentSpot.images[imageIndex]; }
-function goToNextSpot(){ audioEl.pause(); currentIndex++; hasEnteredSpot=false; currentSpot=null; hideAllUI(); }
-function hideAllUI(){ image.style.display="none"; nextBtn.style.display="none"; patternBtn.style.display="none"; prevBtn.style.display="none"; nextImgBtn.style.display="none"; }
+function goToNextSpot() {
+  audioEl.pause();
+  currentIndex++;
+  hasEnteredSpot = false;
+  currentSpot = null;
+  hideAllUI();
+}
+function hideAllUI() {
+  image.style.display = "none";
+  nextBtn.style.display = "none";
+  patternBtn.style.display = "none";
+  prevBtn.style.display = "none";
+  nextImgBtn.style.display = "none";
+}
+function switchPattern() {
+  const patterns = ["A","B","C"];
+  const i = patterns.indexOf(currentPattern);
+  currentPattern = patterns[(i+1)%patterns.length];
+  patternBtn.innerText = currentPattern === "A" ? "English" : (currentPattern === "B" ? "中文" : "日本語");
+  if (currentSpot) { audioEl.pause(); audioEl.src = currentSpot.audio[currentPattern]; audioEl.play().catch(()=>{}); }
+}
+function showPrevImage() { if (!currentSpot) return; imageIndex = (imageIndex - 1 + currentSpot.images.length) % currentSpot.images.length; image.src = currentSpot.images[imageIndex]; }
+function showNextImage() { if (!currentSpot) return; imageIndex = (imageIndex + 1) % currentSpot.images.length; image.src = currentSpot.images[imageIndex]; }
 
-/* ---------------- 位置情報取得 ---------------- */
+/* ---------------- 位置取得開始 (watchPosition) ---------------- */
 if ("geolocation" in navigator) {
-  const options = { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 };
+  const options = { enableHighAccuracy:true, maximumAge:0, timeout:15000 };
   navigator.geolocation.watchPosition(
     pos => onGpsPosition(pos),
-    err => info.innerText = "位置情報の取得に失敗しました: " + err.message,
+    err => info.innerText = "位置情報取得エラー: " + err.message,
     options
   );
 } else {
   info.innerText = "このブラウザは位置情報に対応していません。";
 }
 
-/* ---------------- 起動処理（ユーザー操作） ---------------- */
+/* ---------------- 起動ボタン処理（ユーザー操作内でIMU許可・AudioContext resume） ---------------- */
+let userStarted = false;
 startBtn.addEventListener("click", async () => {
   if (userStarted) return;
   userStarted = true;
-  startupOverlay.style.display = "none"; startupOverlay.setAttribute("aria-hidden","true");
-  try { const AudioCtx = window.AudioContext || window.webkitAudioContext; if (AudioCtx) { const ctx = new AudioCtx(); if (ctx.state === "suspended") await ctx.resume().catch(()=>{}); } } catch(e){}
+  startupOverlay.style.display = "none";
+  startupOverlay.setAttribute("aria-hidden","true");
+
+  try {
+    // 音声再生を許可するためのAudioContext resume
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx) {
+      const ctx = new AudioCtx();
+      if (ctx.state === "suspended") await ctx.resume().catch(()=>{});
+    }
+  } catch(e){}
+
   try { await enableIMU(); } catch(e){ console.warn("enableIMU failed:", e); }
-  // Show first spot UI so user hears audio and calibrates
-  try { showSpot(spots[0]); } catch(e){ console.warn(e); }
+
+  // 初期スポットを表示して音声を流す
+  try { showSpot(spots[0]); } catch(e){ console.warn("showSpot failed", e); }
 });
 
-/* ---------------- ユーティリティ: kf時間安全チェック ---------------- */
-function kfsafeTime(now) { return true; } // placeholder (保険用)
-window.addEventListener("load", ()=>{ updatePatternButtonText(); });
-</script>
+/* ---------------- ログ出力（簡易CSV） ---------------- */
+let loggingEnabled = false;
+const logRows = [];
+function toggleLogging() {
+  loggingEnabled = !loggingEnabled;
+  toggleLogBtn.innerText = loggingEnabled ? "ログ: ON" : "ログ: OFF";
+  if (loggingEnabled) { pushLogSample({ type:"log_start", t:Date.now(), note:"start logging" }); }
+}
+function pushLogSample(obj) {
+  logRows.push(obj);
+}
+function downloadLog() {
+  if (logRows.length === 0) {
+    alert("ログは空です。");
+    return;
+  }
+  // CSV header: time,type,lat,lon,acc,usedLat,usedLon,vN,vE,accX,accY,accZ,extra...
+  const lines = [];
+  lines.push("time,type,lat,lon,acc,usedLat,usedLon,vN,vE,accX,accY,accZ,note");
+  for (const r of logRows) {
+    const t = new Date(r.t).toISOString();
+    const row = [
+      t,
+      r.type || "",
+      r.lat || "",
+      r.lon || "",
+      r.acc || "",
+      r.usedLat || "",
+      r.usedLon || "",
+      r.vN || "",
+      r.vE || "",
+      r.accX || "",
+      r.accY || "",
+      r.accZ || "",
+      (r.note || "")
+    ];
+    lines.push(row.join(","));
+  }
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "nav_log.csv";
+  a.click();
+}
 
+/* ---------------- ユーティリティ ---------------- */
+function resetFilter() { kf.reset(); lastGps = null; originLat = originLon = null; alert("KFリセットしました"); }
+
+/* ---------------- 初期表示 ---------------- */
+window.addEventListener("load", () => {
+  patternBtn.innerText = "English";
+  toggleLogBtn.innerText = "ログ: OFF";
+  downloadLogBtn.style.display = "inline-block";
+  updatePatternBtnText();
+});
+
+/* helper */
+function updatePatternBtnText(){ patternBtn.innerText = currentPattern === "A" ? "English" : (currentPattern === "B" ? "中文" : "日本語"); }
+
+</script>
 </body>
 </html>
