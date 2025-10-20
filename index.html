@@ -2,19 +2,22 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <title>複数画像切替付きスポット案内（自動音声版）</title>
+  <title>複数画像切替付きスポット案内（IMU Fusion + Kalman + Road Snap）</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     body { margin: 0; overflow: hidden; background-color: #000; color: white; font-family: sans-serif; text-align: center; }
     #camera { width: 100vw; height: 100vh; object-fit: cover; position: absolute; top: 0; left: 0; z-index: -1; }
-    #info { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 8px; z-index: 1; white-space: pre-wrap; }
-    #image { position: absolute; bottom: 180px; left: 50%; transform: translateX(-50%); width: 300px; height: 300px; object-fit: contain; display: none; z-index: 1; background: black; }
-    .btn { position: absolute; left: 50%; transform: translateX(-50%); background-color: #007BFF; color: white; border: none; padding: 10px 20px; font-size: 14px; border-radius: 8px; cursor: pointer; z-index: 2; display: none; }
+    #info { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 8px; z-index: 2; white-space: pre-wrap; font-size: 14px; text-align: left; }
+    #image { position: absolute; bottom: 180px; left: 50%; transform: translateX(-50%); width: 300px; height: 300px; object-fit: contain; display: none; z-index: 2; background: black; }
+    .btn { position: absolute; left: 50%; transform: translateX(-50%); background-color: #007BFF; color: white; border: none; padding: 10px 20px; font-size: 14px; border-radius: 8px; cursor: pointer; z-index: 3; display: none; }
     #patternBtn { bottom: 70px; }
     #nextBtn { bottom: 20px; }
-    .img-nav { position: absolute; bottom: 260px; z-index: 2; font-size: 20px; background: rgba(0,0,0,0.5); color: white; border: none; padding: 5px 15px; cursor: pointer; border-radius: 6px; }
+    .img-nav { position: absolute; bottom: 260px; z-index: 3; font-size: 20px; background: rgba(0,0,0,0.5); color: white; border: none; padding: 5px 15px; cursor: pointer; border-radius: 6px; }
     #prevBtn { left: 10%; }
     #nextImgBtn { right: 10%; }
+    #controls { position: absolute; right: 10px; top: 10px; z-index: 3; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 8px; font-size: 13px; color: #fff; }
+    #controls label { display:block; margin-bottom:8px; }
+    #enableSensors { margin-top:6px; width:100%; padding:6px; border-radius:6px; border:none; background:#28a745; color:#fff; cursor:pointer; }
   </style>
 </head>
 <body>
@@ -28,16 +31,34 @@
 <button class="img-nav" id="nextImgBtn" onclick="showNextImage()" style="display:none;">→</button>
 <audio id="audio" src=""></audio>
 
-<script>
-/*
-  統合版スクリプト:
-  - 既存のスポット配列(defaultSpots)を保持
-  - GeoJSON(route.geojson)が存在すればそれを読み込み route 配列に変換して利用
-  - カルマンフィルタでGPSを平滑化
-  - 画像切替、音声切替、次スポット遷移など既存機能を保持
-*/
+<div id="controls">
+  <label><input type="checkbox" id="snapToggle" checked /> 道路スナップを使う (GeoJSON + turf)</label>
+  <label>スナップ距離閾値 (m): <input type="number" id="snapThreshold" value="20" style="width: 70px;" /></label>
+  <label><input type="checkbox" id="kalmanToggle" checked /> Kalman フィルタを使う</label>
+  <button id="reloadRoadsBtn">roads.geojson を再読み込み</button>
+  <button id="enableSensors">センサー融合を有効化</button>
+</div>
 
-/* ---------------- DOM ---------------- */
+<!-- turf.js -->
+<script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+
+<script>
+/* ---------------- データ: スポット ---------------- */
+const spots = [
+  { name: "13号館前", lat: 35.69302425885399, lon: 140.0508424409975, radius: 0, images: ["image0.jpeg", "image1.jpeg"], audio: { A: "spot1.ja.mp3", B: "spot1.en.mp3", C: "spot1.ch.mp3" } },
+  { name: "曲がり角右", lat:35.69283599175495,  lon:140.05092001888113, radius: 10, images: ["image3.jpeg", "image11.jpeg"], audio: { A: "spot3,4.ja.mp3", B: "spot3,4.en.mp3", C: "spot3,4.ch.mp3" } },
+  { name: "曲がり角右１", lat: 35.69286877921128,   lon: 140.05030279528978, radius: 10, images: ["image4.jpeg", "image13.jpeg"], audio: { A: "spot3,4.ja.mp3", B: "spot3,4.en.mp3", C: "spot3,4.ch.mp3" } },
+  { name: "曲がり角右２", lat: 35.69334894066289,  lon: 140.05033682451656, radius: 10, images: ["image5.jpeg", "image14.jpeg"], audio: { A: "spot5,6.ja.mp3", B: "spot5,6.en.mp3", C: "spot5,6.ch.mp3" } },
+  { name: "曲がり角右３", lat: 35.69331981781718,  lon: 140.05102244720183, radius: 10, images: ["image6.jpeg", "image15.jpeg"], audio: { A: "spot5,6.ja.mp3", B: "spot5,6.en.mp3", C: "spot5,6.ch.mp3" } },
+  { name: "目的地", lat: 35.693014464267506,  lon: 140.0509410980045, radius: 10, images: ["image7.jpeg", "image16.jpeg"], audio: { A: "spot7,8.ja.mp3", B: "spot7,8.en.mp3", C: "spot7,8.ch.mp3" } }
+];
+
+let currentIndex = 0;
+let hasEnteredSpot = false;
+let currentSpot = null;
+let currentPattern = "A";
+let imageIndex = 0;
+
 const camera = document.getElementById("camera");
 const info = document.getElementById("info");
 const image = document.getElementById("image");
@@ -47,28 +68,35 @@ const audio = document.getElementById("audio");
 const prevBtn = document.getElementById("prevBtn");
 const nextImgBtn = document.getElementById("nextImgBtn");
 
-/* ---------------- 既定のスポット（フォールバック） ---------------- */
-const defaultSpots = [
-  { name: "13号館前", lat: 35.69302425885399, lon: 140.0508424409975, radius: 0, images: ["image0.jpeg", "image1.jpeg"], audio: { A: "spot1.ja.mp3", B: "spot1.en.mp3", C: "spot1.ch.mp3" } },
-  { name: "曲がり角右", lat:35.69283599175495,  lon:140.05092001888113, radius: 10, images: ["image3.jpeg", "image11.jpeg"], audio: { A: "spot3,4.ja.mp3", B: "spot3,4.en.mp3", C: "spot3,4.ch.mp3" } },
-  { name: "曲がり角右１", lat: 35.69286877921128,   lon: 140.05030279528978, radius: 10, images: ["image4.jpeg", "image13.jpeg"], audio: { A: "spot3,4.ja.mp3", B: "spot3,4.en.mp3", C: "spot3,4.ch.mp3" } },
-  { name: "曲がり角右２", lat: 35.69334894066289,  lon: 140.05033682451656, radius: 10, images: ["image5.jpeg", "image14.jpeg"], audio: { A: "spot5,6.ja.mp3", B: "spot5,6.en.mp3", C: "spot5,6.ch.mp3" } },
-  { name: "曲がり角右３", lat: 35.69331981781718,  lon: 140.05102244720183, radius: 10, images: ["image6.jpeg", "image15.jpeg"], audio: { A: "spot5,6.ja.mp3", B: "spot5,6.en.mp3", C: "spot5,6.ch.mp3" } },
-  { name: "目的地", lat: 35.693014464267506,  lon: 140.0509410980045, radius: 10, images: ["image7.jpeg", "image16.jpeg"], audio: { A: "spot7,8.ja.mp3", B: "spot7,8.en.mp3", C: "spot7,8.ch.mp3" } }
-];
-
-/* ---------------- ルート（GeoJSON などで上書き可能） ---------------- */
-let route = [];        // 実際に使用するスポット配列
-let currentIndex = 0;  // 現在のスポットインデックス
-let hasEnteredSpot = false;
-let currentSpot = null;
-let currentPattern = "A";
-let imageIndex = 0;
+const snapToggle = document.getElementById("snapToggle");
+const snapThresholdInput = document.getElementById("snapThreshold");
+const kalmanToggle = document.getElementById("kalmanToggle");
+const reloadRoadsBtn = document.getElementById("reloadRoadsBtn");
+const enableSensorsBtn = document.getElementById("enableSensors");
 
 /* ---------------- カメラ起動 ---------------- */
-navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false })
+navigator.mediaDevices?.getUserMedia({ video: { facingMode: "environment" }, audio: false })
   .then(stream => camera.srcObject = stream)
-  .catch(err => console.log("カメラへのアクセスに失敗しました: ", err));
+  .catch(err => console.log("カメラへのアクセスに失敗しました:", err));
+
+/* ---------------- Kalman フィルタ (1D) ---------------- */
+class SimpleKalman {
+  constructor(R = 0.00002, Q = 0.000001) {
+    this.R = R; this.Q = Q;
+    this.x = NaN; this.P = 1;
+  }
+  filter(z) {
+    if (isNaN(this.x)) { this.x = z; this.P = 1; return this.x; }
+    this.P = this.P + this.Q;
+    const K = this.P / (this.P + this.R);
+    this.x = this.x + K * (z - this.x);
+    this.P = (1 - K) * this.P;
+    return this.x;
+  }
+  reset() { this.x = NaN; this.P = 1; }
+}
+const kalmanLat = new SimpleKalman();
+const kalmanLon = new SimpleKalman();
 
 /* ---------------- 距離計算（haversine） ---------------- */
 function getDistance(lat1, lon1, lat2, lon2) {
@@ -80,101 +108,262 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-/* ---------------- カルマンフィルタ（簡易・分離） ---------------- */
-let lastLat = null, lastLon = null;
-let xLat = 0, xLon = 0;
-let P_lat = 1, P_lon = 1;
-const Q = 0.00001; // プロセスノイズ（小さめ）
-const R_var = 5;   // 観測ノイズ（大きめ）
-
-function kalman(lat, lon) {
-  if (lastLat === null || lastLon === null) {
-    lastLat = lat; lastLon = lon;
-    xLat = lat; xLon = lon;
-    return { lat, lon };
+/* ---------------- GeoJSON 道路データ読み込み & スナップ ---------------- */
+let roadsGeoJSON = null;
+const roadsUrl = "roads.geojson";
+async function loadRoads() {
+  try {
+    const res = await fetch(roadsUrl);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    roadsGeoJSON = await res.json();
+    console.log("roads.geojson 読み込み完了:", (roadsGeoJSON.features?.length || 0), "features");
+  } catch (e) {
+    roadsGeoJSON = null;
+    console.warn("roads.geojson の読み込みに失敗しました:", e);
   }
+}
+reloadRoadsBtn.onclick = loadRoads;
+loadRoads();
 
-  // lat
-  P_lat = P_lat + Q;
-  let K_lat = P_lat / (P_lat + R_var);
-  xLat = xLat + K_lat * (lat - xLat);
-  P_lat = (1 - K_lat) * P_lat;
-
-  // lon
-  P_lon = P_lon + Q;
-  let K_lon = P_lon / (P_lon + R_var);
-  xLon = xLon + K_lon * (lon - xLon);
-  P_lon = (1 - K_lon) * P_lon;
-
-  lastLat = xLat; lastLon = xLon;
-  return { lat: xLat, lon: xLon };
+function snapToRoad(lat, lon, thresholdMeters = 20) {
+  if (!roadsGeoJSON) return { snapped: false, lat, lon, distanceToRoad: Infinity };
+  const pt = turf.point([lon, lat]);
+  let best = { distance: Infinity, point: null };
+  for (const feature of roadsGeoJSON.features) {
+    if (!feature.geometry) continue;
+    try {
+      const snapped = turf.nearestPointOnLine(feature, pt, { units: "meters" });
+      const d = snapped.properties?.dist ?? snapped.properties?.distance ?? (turf.distance(pt, snapped, { units: "kilometers" }) * 1000);
+      if (typeof d === "number" && d < best.distance) {
+        best.distance = d; best.point = snapped;
+      }
+    } catch (e) {
+      console.warn("nearestPointOnLine failed for feature:", e);
+    }
+  }
+  if (best.point && best.distance <= thresholdMeters) {
+    const [snLon, snLat] = best.point.geometry.coordinates;
+    return { snapped: true, lat: snLat, lon: snLon, distanceToRoad: best.distance };
+  } else {
+    return { snapped: false, lat, lon, distanceToRoad: best.distance };
+  }
 }
 
-/* ---------------- スポット判定 ---------------- */
+/* ---------------- IMUベースのデッドレコニング（センサー融合用） ---------------- */
+// odom: 累積変位（メートル） since last reference (lastRefLatLon)
+let imuEnabled = false;
+let lastImuTs = null;
+let headingDeg = null; // 0..360 (compass)
+let velocityN = 0, velocityE = 0; // m/s
+let odom = { north: 0, east: 0 };
+let lastRef = null; // { lat, lon } 基準となるGPS（または融合後の参照）
+const MAX_IMU_INTEGRATION_TIME = 30000; // ms: 長時間の積分は不安定
+
+function enableIMU() {
+  if (imuEnabled) return;
+  // iOS permissions
+  const reqProms = [];
+  if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
+    reqProms.push(DeviceMotionEvent.requestPermission().catch(e => { console.warn("DeviceMotion request failed", e); return "denied"; }));
+  }
+  if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+    reqProms.push(DeviceOrientationEvent.requestPermission().catch(e => { console.warn("DeviceOrientation request failed", e); return "denied"; }));
+  }
+  Promise.all(reqProms).then(() => {
+    window.addEventListener("devicemotion", onDeviceMotion, { passive: true });
+    window.addEventListener("deviceorientation", onDeviceOrientation, { passive: true });
+    imuEnabled = true;
+    enableSensorsBtn.textContent = "センサー融合 有効";
+    enableSensorsBtn.style.background = "#6c757d";
+  }).catch((e) => {
+    // If no permission API, still try to add listeners (Android / browsers that don't require explicit permission)
+    window.addEventListener("devicemotion", onDeviceMotion, { passive: true });
+    window.addEventListener("deviceorientation", onDeviceOrientation, { passive: true });
+    imuEnabled = true;
+    enableSensorsBtn.textContent = "センサー融合 有効";
+    enableSensorsBtn.style.background = "#6c757d";
+  });
+}
+
+enableSensorsBtn.onclick = enableIMU;
+
+// DeviceOrientation: ヘディングを取得（alpha / webkitCompassHeading）
+function onDeviceOrientation(e) {
+  // Prefer compass heading if available (webkit)
+  if (typeof e.webkitCompassHeading === "number") {
+    headingDeg = e.webkitCompassHeading;
+  } else if (typeof e.alpha === "number") {
+    // alpha is rotation around Z axis (0..360) but depending on absolute and device orientation.
+    // When absolute === true, alpha approximates compass heading.
+    headingDeg = e.alpha;
+  } else {
+    headingDeg = null;
+  }
+}
+
+// DeviceMotion: 単純化した前方軸のみを用いた積分（影響を最小限に）。これはサンプル実装です。
+function onDeviceMotion(e) {
+  const now = Date.now();
+  if (!lastImuTs) lastImuTs = now;
+  const dt = Math.min(0.2, (now - lastImuTs) / 1000); // 秒、上限を設ける
+  lastImuTs = now;
+
+  // acc: m/s^2. Prefer acceleration (without gravity). Fallback to includingGravity.
+  const acc = e.acceleration && (e.acceleration.x !== null || e.acceleration.y !== null) ? e.acceleration : e.accelerationIncludingGravity;
+  if (!acc) return;
+
+  // Device axes mapping varies. Common heuristic:
+  // - acc.y: forward/back on many devices (positive when device top moves up)
+  // We use a simple heuristic: forwardAccel = -acc.y
+  const forwardAccel = -(acc.y || 0);
+
+  // If heading available, project forward axis into North/East. Otherwise assume no rotation (can't orient).
+  const h = (typeof headingDeg === "number") ? (headingDeg * Math.PI / 180) : null;
+
+  // Compute acceleration in earth-frame north/east (m/s^2)
+  let aN = 0, aE = 0;
+  if (h !== null) {
+    aN = forwardAccel * Math.cos(h);
+    aE = forwardAccel * Math.sin(h);
+  } else {
+    // If heading not known, assume forward is north (fallback)
+    aN = forwardAccel;
+    aE = 0;
+  }
+
+  // Integrate velocity and displacement (basic)
+  velocityN += aN * dt;
+  velocityE += aE * dt;
+
+  const dispN = velocityN * dt + 0.5 * aN * dt * dt;
+  const dispE = velocityE * dt + 0.5 * aE * dt * dt;
+
+  // Accumulate odometry
+  odom.north += dispN;
+  odom.east += dispE;
+
+  // Prevent runaway accumulation if no GPS for too long
+  if (lastRef && (Date.now() - lastRef.ts) > MAX_IMU_INTEGRATION_TIME) {
+    // reset velocities to reduce drift after long time
+    velocityN = 0; velocityE = 0;
+    odom.north = 0; odom.east = 0;
+    lastImuTs = null;
+  }
+}
+
+/* ---------------- 位置情報（GPS）とセンサー融合のロジック ---------------- */
+let lastGps = null; // { lat, lon, ts }
+const metersPerDegLat = 111320;
+
+function metersPerDegLonAtLat(lat) {
+  return 111320 * Math.cos(lat * Math.PI / 180);
+}
+
+function onGpsPosition(pos) {
+  const rawLat = pos.coords.latitude;
+  const rawLon = pos.coords.longitude;
+  const accuracy = pos.coords.accuracy || 30;
+
+  if (!lastGps) {
+    // 初回: 基準を設定
+    lastGps = { lat: rawLat, lon: rawLon, ts: Date.now() };
+    // reset odometry relative to this reference
+    odom.north = 0; odom.east = 0;
+    velocityN = 0; velocityE = 0;
+    lastRef = { lat: lastGps.lat, lon: lastGps.lon, ts: lastGps.ts };
+    // Use possible snap & kalman
+    processFusedPosition(lastGps.lat, lastGps.lon, accuracy);
+    return;
+  }
+
+  // 1) 予測位置 = lastRef + odom
+  const mpdLon = metersPerDegLonAtLat(lastRef.lat);
+  const predLat = lastRef.lat + (odom.north / metersPerDegLat);
+  const predLon = lastRef.lon + (odom.east / mpdLon);
+
+  // 2) 融合係数 beta: GPSの精度が悪ければIMUにより重みを置く
+  // accuracy (m): small => trust GPS; large => trust IMU more
+  const beta = Math.min(0.9, (accuracy / 100)); // 0..0.9
+  const fusedLat = rawLat * (1 - beta) + predLat * beta;
+  const fusedLon = rawLon * (1 - beta) + predLon * beta;
+
+  // 3) リセット: 今回の融合結果を新しい参照にする（odometry をリセット）
+  lastGps = { lat: fusedLat, lon: fusedLon, ts: Date.now() };
+  lastRef = { lat: fusedLat, lon: fusedLon, ts: lastGps.ts };
+  odom.north = 0; odom.east = 0;
+  velocityN = 0; velocityE = 0;
+
+  // 4) optional: Kalman filtering
+  let usedLat = fusedLat, usedLon = fusedLon;
+  if (kalmanToggle.checked) {
+    usedLat = kalmanLat.filter(fusedLat);
+    usedLon = kalmanLon.filter(fusedLon);
+  }
+
+  // 5) optional: snap to road
+  if (snapToggle.checked) {
+    const thr = Number(snapThresholdInput.value) || 20;
+    const snapRes = snapToRoad(usedLat, usedLon, thr);
+    if (snapRes.snapped) {
+      usedLat = snapRes.lat; usedLon = snapRes.lon;
+    }
+  }
+
+  // 6) 最終的な位置で判定
+  checkProximity(usedLat, usedLon);
+}
+
+/* ---------------- スポット判定（シンプル表示） ---------------- */
 function checkProximity(lat, lon) {
-  if (currentIndex >= route.length) {
+  if (currentIndex >= spots.length) {
     info.innerText = "すべてのスポットを通過しました。";
     hideAllUI();
     return;
   }
-  const spot = route[currentIndex];
+  const spot = spots[currentIndex];
   const distance = getDistance(lat, lon, spot.lat, spot.lon);
   const range = spot.radius || 10;
 
+  // シンプルなinfo表示（詳細な raw/filtered/snapped は表示しない）
   info.innerText =
     `現在地: 緯度 ${lat.toFixed(6)}, 経度 ${lon.toFixed(6)}\n` +
-    `次のスポット: ${spot.name}（${currentIndex + 1} / ${route.length}）\n` +
+    `次のスポット: ${spot.name}（${currentIndex + 1} / ${spots.length}）\n` +
     `残り距離: ${distance.toFixed(1)}m`;
 
-  if (!hasEnteredSpot && distance < range) {
+  if (currentIndex >= 1 && !hasEnteredSpot && distance < range) {
     showSpot(spot);
   }
 }
 
-/* ---------------- スポット表示 ---------------- */
+/* ---------------- スポット表示 / 画像 / 音声 ---------------- */
 function showSpot(spot) {
   currentSpot = spot;
   hasEnteredSpot = true;
   imageIndex = 0;
 
-  audio.src = (spot.audio && spot.audio[currentPattern]) ? spot.audio[currentPattern] : "";
-  image.src = (spot.images && spot.images.length) ? spot.images[imageIndex] : "";
-  image.style.display = (spot.images && spot.images.length) ? "block" : "none";
+  audio.src = spot.audio[currentPattern];
+  image.src = spot.images[imageIndex];
+  image.style.display = "block";
   nextBtn.style.display = "block";
   patternBtn.style.display = "block";
-  prevBtn.style.display = (spot.images && spot.images.length > 1) ? "block" : "none";
-  nextImgBtn.style.display = (spot.images && spot.images.length > 1) ? "block" : "none";
+  prevBtn.style.display = spot.images.length > 1 ? "block" : "none";
+  nextImgBtn.style.display = spot.images.length > 1 ? "block" : "none";
 
   audio.loop = true;
   audio.play().catch(e => console.log("自動再生に失敗:", e));
 }
 
-/* ---------------- 画像切替 ---------------- */
-function showPrevImage() {
-  if (!currentSpot || !currentSpot.images) return;
-  imageIndex = (imageIndex - 1 + currentSpot.images.length) % currentSpot.images.length;
-  image.src = currentSpot.images[imageIndex];
-}
-function showNextImage() {
-  if (!currentSpot || !currentSpot.images) return;
-  imageIndex = (imageIndex + 1) % currentSpot.images.length;
-  image.src = currentSpot.images[imageIndex];
-}
-
-/* ---------------- 音声パターン切替 ---------------- */
 function switchPattern() {
   const patterns = ["A", "B", "C"];
   const index = patterns.indexOf(currentPattern);
   currentPattern = patterns[(index + 1) % patterns.length];
   updatePatternButtonText();
-
-  if (currentSpot && currentSpot.audio) {
+  if (currentSpot) {
     audio.pause();
     audio.src = currentSpot.audio[currentPattern];
     audio.play().catch(e => console.log("自動再生に失敗:", e));
   }
 }
-
 function updatePatternButtonText() {
   let label = "";
   switch (currentPattern) {
@@ -184,8 +373,16 @@ function updatePatternButtonText() {
   }
   patternBtn.innerText = label;
 }
-
-/* ---------------- 次のスポットへ ---------------- */
+function showPrevImage() {
+  if (!currentSpot) return;
+  imageIndex = (imageIndex - 1 + currentSpot.images.length) % currentSpot.images.length;
+  image.src = currentSpot.images[imageIndex];
+}
+function showNextImage() {
+  if (!currentSpot) return;
+  imageIndex = (imageIndex + 1) % currentSpot.images.length;
+  image.src = currentSpot.images[imageIndex];
+}
 function goToNextSpot() {
   audio.pause();
   currentIndex++;
@@ -193,8 +390,6 @@ function goToNextSpot() {
   currentSpot = null;
   hideAllUI();
 }
-
-/* ---------------- UI 非表示 ---------------- */
 function hideAllUI() {
   image.style.display = "none";
   nextBtn.style.display = "none";
@@ -203,96 +398,22 @@ function hideAllUI() {
   nextImgBtn.style.display = "none";
 }
 
-/* ---------------- GPS監視 ---------------- */
-function startGeolocationWatch() {
-  if ("geolocation" in navigator) {
-    navigator.geolocation.watchPosition(
-      pos => {
-        const corrected = kalman(pos.coords.latitude, pos.coords.longitude);
-        checkProximity(corrected.lat, corrected.lon);
-      },
-      err => info.innerText = "位置情報の取得に失敗しました: " + (err && err.message ? err.message : err),
-      { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
-    );
-  } else {
-    info.innerText = "このブラウザでは位置情報が利用できません。";
-  }
+/* ---------------- 位置情報取得: watchPosition ---------------- */
+if ("geolocation" in navigator) {
+  const options = { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 };
+  navigator.geolocation.watchPosition(
+    pos => onGpsPosition(pos),
+    err => info.innerText = "位置情報の取得に失敗しました: " + err.message,
+    options
+  );
+} else {
+  info.innerText = "このブラウザは位置情報に対応していません。";
 }
 
-/* ---------------- GeoJSON読み込み（任意） ---------------- */
-async function loadGeoJSONIfExists() {
-  try {
-    const res = await fetch("demo.geojson", { cache: "no-store" });
-    if (!res.ok) throw new Error("route.geojson not found");
-    const data = await res.json();
-
-    // サポート: LineString or Point features
-    const features = data.features || [];
-    const points = [];
-
-    features.forEach((f, idx) => {
-      if (!f.geometry) return;
-      const g = f.geometry;
-      if (g.type === "LineString") {
-        // LineString の各座標をポイントとして扱う
-        g.coordinates.forEach((c, i) => {
-          points.push({
-            lon: c[0],
-            lat: c[1],
-            name: `点 ${idx + 1}-${i + 1}`,
-            radius: 10,
-            images: ["image0.jpeg"],
-            audio: { A: "spot1.ja.mp3", B: "spot1.en.mp3", C: "spot1.ch.mp3" }
-          });
-        });
-      } else if (g.type === "Point") {
-        const c = g.coordinates;
-        points.push({
-          lon: c[0],
-          lat: c[1],
-          name: (f.properties && f.properties.name) ? f.properties.name : `点 ${idx + 1}`,
-          radius: (f.properties && f.properties.radius) ? f.properties.radius : 10,
-          images: (f.properties && f.properties.images) ? f.properties.images : ["image0.jpeg"],
-          audio: (f.properties && f.properties.audio) ? f.properties.audio : { A: "spot1.ja.mp3", B: "spot1.en.mp3", C: "spot1.ch.mp3" }
-        });
-      }
-    });
-
-    if (points.length > 0) {
-      route = points;
-      console.log("GeoJSON route loaded. Points:", route.length);
-      return;
-    } else {
-      throw new Error("route.geojson に有効な座標がありません");
-    }
-  } catch (e) {
-    console.log("GeoJSON 読み込みをスキップ: ", e.message || e);
-    // フォールバック
-    route = defaultSpots.slice();
-  }
-}
-
-/* ---------------- 起動 ---------------- */
-window.onload = async () => {
-  // GeoJSON があれば route を上書き、なければ defaultSpots を使用
-  await loadGeoJSONIfExists();
-
-  // route が空ならフォールバック
-  if (!route || route.length === 0) route = defaultSpots.slice();
-
-  // 最初のスポットを表示（従来の挙動を保持）
-  currentIndex = 0;
-  hasEnteredSpot = false;
-  currentSpot = null;
+/* ---------------- 起動時 ---------------- */
+window.onload = () => {
   updatePatternButtonText();
-
-  // 必要なら起動時に最初のスポットを見せる（元コードと同様）
-  // showSpot(route[0]);
-
-  // GPS監視開始
-  startGeolocationWatch();
-
-  // もし起動時に最初のスポットを常に表示したければ上のコメントを外してください
+  showSpot(spots[0]); // 起動時に最初のスポットを表示（必要なら削除）
 };
 </script>
 
