@@ -17,9 +17,6 @@
     #nextImgBtn { right:12%; display:none; }
     #startupOverlay { position:absolute; inset:0; z-index:20; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:12px; background:linear-gradient(180deg, rgba(0,0,0,0.6), rgba(0,0,0,0.85)); }
     #startBtn { background:#d9534f; color:white; padding:18px 28px; font-size:18px; border-radius:12px; border:none; }
-    #controls { position:absolute; right:12px; top:12px; z-index:8; display:flex; flex-direction:column; gap:8px; }
-    .small { padding:8px 10px; font-size:13px; border-radius:8px; border:none; background:rgba(255,255,255,0.06); color:#fff; }
-    #logBtn { background:#28a745; }
   </style>
 </head>
 <body>
@@ -34,16 +31,10 @@
 <button class="imgNav" id="nextImgBtn" onclick="showNextImage()">→</button>
 <audio id="audio" src=""></audio>
 
-<div id="controls">
-  <button class="small" id="toggleLog" onclick="toggleLogging()">ログ: OFF</button>
-  <button class="small" id="downloadLog" onclick="downloadLog()">ログをダウンロード</button>
-  <button class="small" id="resetKF" onclick="resetFilter()">KFリセット</button>
-</div>
-
 <div id="startupOverlay" aria-hidden="false">
   <button id="startBtn">避難開始</button>
   <div id="startSub" style="color:#ddd; max-width:80%; text-align:center; font-size:14px;">
-    タップしてセンサー（IMU）と音声再生を許可します。屋外での位置誤差が大きい場合は「ログをダウンロード」して解析できます。
+    タップしてセンサー（IMU）と音声再生を許可します。屋外での位置誤差が大きい場合は設定を調整してください。
   </div>
 </div>
 
@@ -52,14 +43,12 @@
 
 <script>
 /*
-  改良版 全体HTML:
+  改良版（ログ無し・KFリセットボタン無し・表示簡略）
   - GPSジャンプ除去（歩行速度ベース）
-  - 4-state Kalman filter (north,east,vN,vE) : IMUは predict、GPSは update
-  - GPS accuracy を観測ノイズに使う
-  - 静止検出 (ZUPT) による速度抑制
-  - roads.geojson によるマップマッチ（snap）
-  - ログ出力（CSV）
-  - UI: 画像・音声切替、ログダウンロード
+  - 4状態カルマン（N/E位置＋N/E速度）：IMUはpredict、GPSはupdate
+  - GPSのaccuracyを観測ノイズとして利用
+  - 静止検出（ZUPT）で速度ドリフト抑制
+  - roads.geojson によるマップスナップ
 */
 
 /* ---------------- スポットデータ（例） ---------------- */
@@ -80,8 +69,6 @@ const nextImgBtn = document.getElementById("nextImgBtn");
 const audioEl = document.getElementById("audio");
 const startupOverlay = document.getElementById("startupOverlay");
 const startBtn = document.getElementById("startBtn");
-const toggleLogBtn = document.getElementById("toggleLog");
-const downloadLogBtn = document.getElementById("downloadLog");
 
 let currentIndex = 0;
 let currentSpot = null;
@@ -97,7 +84,6 @@ navigator.mediaDevices?.getUserMedia({ video: { facingMode: "environment" }, aud
 /* ---------------- roads.geojson 読込 ---------------- */
 let roadsGeoJSON = null;
 const roadsUrl = "demo.geojson";
-const SNAP_THRESHOLD_BASE = 10; // m
 async function loadRoads() {
   try {
     const r = await fetch(roadsUrl);
@@ -161,40 +147,29 @@ class KF4 {
   }
   predict(aN, aE, dt) {
     if (!dt || dt <= 0) return;
-    // state transition
-    // n' = n + vN*dt + 0.5*aN*dt^2
-    // e' = e + vE*dt + 0.5*aE*dt^2
-    // vN' = vN + aN*dt
-    // vE' = vE + aE*dt
     const n = this.x[0] + this.x[2]*dt + 0.5*aN*dt*dt;
     const e = this.x[1] + this.x[3]*dt + 0.5*aE*dt*dt;
     const vN = this.x[2] + aN*dt;
     const vE = this.x[3] + aE*dt;
     this.x = [n,e,vN,vE];
-
-    // linearized F
     const F = [
       [1,0,dt,0],
       [0,1,0,dt],
       [0,0,1,0],
       [0,0,0,1]
     ];
-    // process noise scaled by dt
     const Q = mulScalar(this.Qbase, dt);
     this.P = addMat(mulMat(F, mulMat(this.P, transpose(F))), Q);
   }
   updatePos(n_meas, e_meas, Rpos) {
-    // H = [[1,0,0,0],[0,1,0,0]]
     const H = [[1,0,0,0],[0,1,0,0]];
     const z = [n_meas, e_meas];
     const R = [[Rpos*Rpos,0],[0,Rpos*Rpos]];
-    // y = z - Hx
     const Hx = matVec(H, this.x);
     const y = [z[0]-Hx[0], z[1]-Hx[1]];
-    // S = H P H^T + R
     const S = addMat(mulMat(H, mulMat(this.P, transpose(H))), R);
     const K = mulMat(this.P, mulMat(transpose(H), inv2(S)));
-    const K_vec = matVec(K, y); // 4x1
+    const K_vec = matVec(K, y);
     this.x = addVec(this.x, K_vec);
     const I = eye(4,1);
     const KH = mulMat(K, H);
@@ -214,13 +189,7 @@ function addMat(A,B){ return A.map((row,i)=>row.map((v,j)=>v + (B[i][j]||0))); }
 function subMat(A,B){ return A.map((row,i)=>row.map((v,j)=>v - (B[i][j]||0))); }
 function addVec(a,b){ return a.map((v,i)=>v + (b[i]||0)); }
 function mulScalar(A,s){ return A.map(row=>row.map(v=>v*s)); }
-function inv2(M){ // inverse 2x2
-  const a=M[0][0], b=M[0][1], c=M[1][0], d=M[1][1];
-  const det = a*d - b*c;
-  if (Math.abs(det) < 1e-9) return [[1e9,0],[0,1e9]];
-  const id = 1/det;
-  return [[ d*id, -b*id], [-c*id, a*id]];
-}
+function inv2(M){ const a=M[0][0], b=M[0][1], c=M[1][0], d=M[1][1]; const det = a*d - b*c; if (Math.abs(det) < 1e-9) return [[1e9,0],[0,1e9]]; const id = 1/det; return [[ d*id, -b*id], [-c*id, a*id]]; }
 
 /* ---------------- フィルタとIMU ---------------- */
 const kf = new KF4();
@@ -228,9 +197,7 @@ let imuEnabled = false;
 let lastImuTs = null;
 let headingDeg = null;
 let lastGps = null; // {lat,lon,ts,accuracy}
-const MAX_IMU_INTEGRATION_MS = 20000; // 長時間は信用しない
-
-/* IMU の有効化 (iOS の permission を考慮) */
+const MAX_IMU_INTEGRATION_MS = 20000;
 function enableIMU() {
   if (imuEnabled) return Promise.resolve();
   const perms = [];
@@ -240,21 +207,13 @@ function enableIMU() {
     window.addEventListener("devicemotion", onDeviceMotion, { passive:true });
     window.addEventListener("deviceorientation", onDeviceOrientation, { passive:true });
     imuEnabled = true;
-    console.log("IMU enabled");
   }).catch(e => {
     window.addEventListener("devicemotion", onDeviceMotion, { passive:true });
     window.addEventListener("deviceorientation", onDeviceOrientation, { passive:true });
     imuEnabled = true;
-    console.warn("IMU enable error, listeners attached anyway:", e);
   });
 }
-
-function onDeviceOrientation(e){
-  if (typeof e.webkitCompassHeading === "number") headingDeg = e.webkitCompassHeading;
-  else if (typeof e.alpha === "number") headingDeg = e.alpha;
-  else headingDeg = null;
-}
-
+function onDeviceOrientation(e){ if (typeof e.webkitCompassHeading === "number") headingDeg = e.webkitCompassHeading; else if (typeof e.alpha === "number") headingDeg = e.alpha; else headingDeg = null; }
 let stationaryCounter = 0;
 function onDeviceMotion(e){
   const now = Date.now();
@@ -262,92 +221,52 @@ function onDeviceMotion(e){
   const dt = Math.min(0.2, (now - lastImuTs)/1000);
   lastImuTs = now;
   if (!dt || dt <= 0) return;
-
   const acc = e.acceleration && (e.acceleration.x !== null || e.acceleration.y !== null) ? e.acceleration : e.accelerationIncludingGravity;
   if (!acc) return;
-
-  const forwardAccel = -(acc.y || 0); // 簡易: デバイスのy軸を前方と仮定
+  const forwardAccel = -(acc.y || 0);
   const h = (typeof headingDeg === "number") ? (headingDeg * Math.PI / 180) : null;
   let aN = 0, aE = 0;
   if (h !== null) { aN = forwardAccel * Math.cos(h); aE = forwardAccel * Math.sin(h); }
   else { aN = forwardAccel; aE = 0; }
-
-  // 静止検出
   const accNorm = Math.sqrt((acc.x||0)**2 + (acc.y||0)**2 + (acc.z||0)**2);
   if (accNorm < 0.18) stationaryCounter++; else stationaryCounter = 0;
-  if (stationaryCounter > 6) {
-    // ZUPT: 速度を0に寄せる(歩行での短時間停止防止)
-    kf.x[2] = 0; kf.x[3] = 0;
-  }
-
+  if (stationaryCounter > 6) { kf.x[2] = 0; kf.x[3] = 0; }
   kf.predict(aN, aE, dt);
-  // IMUを長時間積分した場合はcovを増やして信頼を下げる
-  if (lastGps && (Date.now() - lastGps.ts) > MAX_IMU_INTEGRATION_MS) {
-    kf.P[2][2] += 1.0;
-    kf.P[3][3] += 1.0;
-  }
-
-  // ロギング用のIMUデータ保存
-  if (loggingEnabled) {
-    pushLogSample({ type:"imu", t:Date.now(), accX:acc.x, accY:acc.y, accZ:acc.z, aN, aE });
-  }
+  if (lastGps && (Date.now() - lastGps.ts) > MAX_IMU_INTEGRATION_MS) { kf.P[2][2] += 1.0; kf.P[3][3] += 1.0; }
 }
 
 /* ---------------- GPS ハンドラ（ジャンプ除去、fusion） ---------------- */
-const MAX_WALK_SPEED = 3.0; // m/s（歩行: ~1.5-2.0。状況によって調整）
+const MAX_WALK_SPEED = 3.0;
 function onGpsPosition(pos) {
   const rawLat = pos.coords.latitude;
   const rawLon = pos.coords.longitude;
   const accuracy = pos.coords.accuracy || 30;
   const ts = pos.timestamp || Date.now();
-
-  // 初回 origin 設定
   if (originLat === null) { originLat = rawLat; originLon = rawLon; }
-
-  // ジャンプ除去: 前回GPSとの比較
   if (lastGps) {
     const dt = Math.max(0.001, (ts - lastGps.ts) / 1000.0);
     const jumpDist = haversine(rawLat, rawLon, lastGps.lat, lastGps.lon);
     const allowed = MAX_WALK_SPEED * dt + Math.max(3, accuracy, lastGps.accuracy);
     if (jumpDist > allowed * 2.5) {
       console.warn("GPS spike rejected:", jumpDist.toFixed(1), "m dt=", dt.toFixed(2), "s acc=", accuracy.toFixed(1));
-      // ログ
-      if (loggingEnabled) pushLogSample({ type:"gps_reject", t:ts, lat:rawLat, lon:rawLon, acc:accuracy, jumpDist });
-      return; // 捨てる
+      return;
     }
   }
-
-  // メジャー: 局所座標に変換
-  const local = latLonToLocal(rawLat, rawLon); // x:east, y:north
-
-  // 精度に応じて観測ノイズ (下限を設定)
+  const local = latLonToLocal(rawLat, rawLon);
   const Rpos = Math.max(3, accuracy);
-
-  // カルマンに更新 (位置観測)
   kf.updatePos(local.y, local.x, Rpos);
-
-  // マップマッチ: threshold を精度依存に
   const snapThresh = Math.max(5, Math.min(25, accuracy * 1.5));
   const state = kf.getState();
   const stLatLon = localToLatLon(state[0], state[1]);
   const snapRes = snapToRoad(stLatLon.lat, stLatLon.lon, snapThresh);
   if (snapRes.snapped) {
     const sLocal = latLonToLocal(snapRes.lat, snapRes.lon);
-    // スナップ時は強めに位置更新（小さいR）
     kf.updatePos(sLocal.y, sLocal.x, Math.max(2, accuracy*0.5));
   }
-
   lastGps = { lat: rawLat, lon: rawLon, ts, accuracy };
-
-  // 表示更新
-  const s = kf.getState(); // [n,e,vN,vE]
+  const s = kf.getState();
   const usedLatLon = localToLatLon(s[0], s[1]);
-  updateInfo(usedLatLon.lat, usedLatLon.lon, accuracy);
-
-  // ログ
-  if (loggingEnabled) {
-    pushLogSample({ type:"gps", t:ts, lat:rawLat, lon:rawLon, acc:accuracy, usedLat:usedLatLon.lat, usedLon:usedLatLon.lon, vN:s[2], vE:s[3] });
-  }
+  updateInfo(usedLatLon.lat, usedLatLon.lon);
 }
 
 /* ---------------- 距離計算 (haversine) ---------------- */
@@ -360,8 +279,8 @@ function haversine(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-/* ---------------- UI 表示・スポット判定 ---------------- */
-function updateInfo(lat, lon, accuracy) {
+/* ---------------- UI 表示・スポット判定（簡略化） ---------------- */
+function updateInfo(lat, lon) {
   if (currentIndex >= spots.length) {
     info.innerText = `すべてのスポットを通過しました。`;
     hideAllUI();
@@ -373,11 +292,8 @@ function updateInfo(lat, lon, accuracy) {
   info.innerText =
     `推定現在地: 緯度 ${lat.toFixed(6)}, 経度 ${lon.toFixed(6)}\n` +
     `次のスポット: ${spot.name} (${currentIndex+1}/${spots.length})\n` +
-    `残距離: ${dist.toFixed(1)} m  精度(GPS): ${accuracy ? accuracy.toFixed(1) + " m" : "―"}\n` +
-    `KF速度: ${Math.hypot(kf.x[2], kf.x[3]).toFixed(2)} m/s`;
-  if (!hasEnteredSpot && dist < range) {
-    showSpot(spot);
-  }
+    `残り距離: ${dist.toFixed(1)} m`;
+  if (!hasEnteredSpot && dist < range) showSpot(spot);
 }
 
 function showSpot(spot) {
@@ -416,7 +332,7 @@ function switchPattern() {
 function showPrevImage() { if (!currentSpot) return; imageIndex = (imageIndex - 1 + currentSpot.images.length) % currentSpot.images.length; image.src = currentSpot.images[imageIndex]; }
 function showNextImage() { if (!currentSpot) return; imageIndex = (imageIndex + 1) % currentSpot.images.length; image.src = currentSpot.images[imageIndex]; }
 
-/* ---------------- 位置取得開始 (watchPosition) ---------------- */
+/* ---------------- 位置取得開始 ---------------- */
 if ("geolocation" in navigator) {
   const options = { enableHighAccuracy:true, maximumAge:0, timeout:15000 };
   navigator.geolocation.watchPosition(
@@ -428,88 +344,22 @@ if ("geolocation" in navigator) {
   info.innerText = "このブラウザは位置情報に対応していません。";
 }
 
-/* ---------------- 起動ボタン処理（ユーザー操作内でIMU許可・AudioContext resume） ---------------- */
+/* ---------------- 起動ボタン処理 ---------------- */
 let userStarted = false;
 startBtn.addEventListener("click", async () => {
   if (userStarted) return;
   userStarted = true;
   startupOverlay.style.display = "none";
   startupOverlay.setAttribute("aria-hidden","true");
-
-  try {
-    // 音声再生を許可するためのAudioContext resume
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (AudioCtx) {
-      const ctx = new AudioCtx();
-      if (ctx.state === "suspended") await ctx.resume().catch(()=>{});
-    }
-  } catch(e){}
-
+  try { const AudioCtx = window.AudioContext || window.webkitAudioContext; if (AudioCtx) { const ctx = new AudioCtx(); if (ctx.state === "suspended") await ctx.resume().catch(()=>{}); } } catch(e){}
   try { await enableIMU(); } catch(e){ console.warn("enableIMU failed:", e); }
-
-  // 初期スポットを表示して音声を流す
   try { showSpot(spots[0]); } catch(e){ console.warn("showSpot failed", e); }
 });
-
-/* ---------------- ログ出力（簡易CSV） ---------------- */
-let loggingEnabled = false;
-const logRows = [];
-function toggleLogging() {
-  loggingEnabled = !loggingEnabled;
-  toggleLogBtn.innerText = loggingEnabled ? "ログ: ON" : "ログ: OFF";
-  if (loggingEnabled) { pushLogSample({ type:"log_start", t:Date.now(), note:"start logging" }); }
-}
-function pushLogSample(obj) {
-  logRows.push(obj);
-}
-function downloadLog() {
-  if (logRows.length === 0) {
-    alert("ログは空です。");
-    return;
-  }
-  // CSV header: time,type,lat,lon,acc,usedLat,usedLon,vN,vE,accX,accY,accZ,extra...
-  const lines = [];
-  lines.push("time,type,lat,lon,acc,usedLat,usedLon,vN,vE,accX,accY,accZ,note");
-  for (const r of logRows) {
-    const t = new Date(r.t).toISOString();
-    const row = [
-      t,
-      r.type || "",
-      r.lat || "",
-      r.lon || "",
-      r.acc || "",
-      r.usedLat || "",
-      r.usedLon || "",
-      r.vN || "",
-      r.vE || "",
-      r.accX || "",
-      r.accY || "",
-      r.accZ || "",
-      (r.note || "")
-    ];
-    lines.push(row.join(","));
-  }
-  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "nav_log.csv";
-  a.click();
-}
-
-/* ---------------- ユーティリティ ---------------- */
-function resetFilter() { kf.reset(); lastGps = null; originLat = originLon = null; alert("KFリセットしました"); }
 
 /* ---------------- 初期表示 ---------------- */
 window.addEventListener("load", () => {
   patternBtn.innerText = "English";
-  toggleLogBtn.innerText = "ログ: OFF";
-  downloadLogBtn.style.display = "inline-block";
-  updatePatternBtnText();
 });
-
-/* helper */
-function updatePatternBtnText(){ patternBtn.innerText = currentPattern === "A" ? "English" : (currentPattern === "B" ? "中文" : "日本語"); }
-
 </script>
 </body>
 </html>
