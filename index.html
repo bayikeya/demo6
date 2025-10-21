@@ -1,324 +1,171 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="utf-8" />
-  <title>スポット案内（IMU融合 + 4-state Kalman + ジャンプ除去 + Road Snap）</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta charset="UTF-8" />
+  <title>QR位置補正付き避難誘導（自動音声案内）</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
-    body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif; background:#000; color:#fff; overflow:hidden; }
-    #camera { position: absolute; inset:0; width:100vw; height:100vh; object-fit:cover; z-index:0; filter:brightness(0.7); }
-    #info { position: absolute; left: 12px; top: 12px; background: rgba(0,0,0,0.5); padding:10px; border-radius:8px; z-index:5; font-size:13px; white-space:pre-wrap; max-width:40vw; }
-    #image { position:absolute; left:50%; transform:translateX(-50%); bottom:150px; width:320px; height:240px; object-fit:contain; z-index:6; display:none; border-radius:8px; background:#111; }
-    .btn { position:absolute; left:50%; transform:translateX(-50%); padding:10px 18px; border-radius:8px; border:none; background:#007bff; color:white; z-index:7; display:none; }
-    #patternBtn { bottom:110px; }
-    #nextBtn { bottom:60px; }
-    .imgNav { position:absolute; bottom:160px; z-index:7; padding:6px 12px; border-radius:6px; background:rgba(0,0,0,0.5); border:none; color:white; font-size:18px; }
-    #prevBtn { left:12%; display:none; }
-    #nextImgBtn { right:12%; display:none; }
-    #startupOverlay { position:absolute; inset:0; z-index:20; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:12px; background:linear-gradient(180deg, rgba(0,0,0,0.6), rgba(0,0,0,0.85)); }
-    #startBtn { background:#d9534f; color:white; padding:18px 28px; font-size:18px; border-radius:12px; border:none; }
+    body { margin: 0; overflow: hidden; background-color: #000; color: white; font-family: sans-serif; text-align: center; }
+    #camera { width: 100vw; height: 100vh; object-fit: cover; position: absolute; top: 0; left: 0; z-index: -1; }
+    #info { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 8px; z-index: 1; white-space: pre-wrap; }
+    #image { position: absolute; bottom: 180px; left: 50%; transform: translateX(-50%); width: 300px; height: 300px; object-fit: contain; display: none; z-index: 1; background: black; }
+    .btn { position: absolute; left: 50%; transform: translateX(-50%); background-color: #007BFF; color: white; border: none; padding: 10px 20px; font-size: 14px; border-radius: 8px; cursor: pointer; z-index: 2; display: none; }
+    #patternBtn { bottom: 70px; }
+    #nextBtn { bottom: 20px; }
+    .img-nav { position: absolute; bottom: 260px; z-index: 2; font-size: 20px; background: rgba(0,0,0,0.5); color: white; border: none; padding: 5px 15px; cursor: pointer; border-radius: 6px; }
+    #prevBtn { left: 10%; }
+    #nextImgBtn { right: 10%; }
   </style>
 </head>
 <body>
 
 <video id="camera" autoplay playsinline muted></video>
-
-<div id="info">初期化中...</div>
+<div id="info">位置情報取得中...</div>
 <img id="image" src="" alt="スポット画像" />
 <button class="btn" id="patternBtn" onclick="switchPattern()">English</button>
 <button class="btn" id="nextBtn" onclick="goToNextSpot()">このスポットは完了</button>
-<button class="imgNav" id="prevBtn" onclick="showPrevImage()">←</button>
-<button class="imgNav" id="nextImgBtn" onclick="showNextImage()">→</button>
+<button class="img-nav" id="prevBtn" onclick="showPrevImage()" style="display:none;">←</button>
+<button class="img-nav" id="nextImgBtn" onclick="showNextImage()" style="display:none;">→</button>
 <audio id="audio" src=""></audio>
 
-<div id="startupOverlay" aria-hidden="false">
-  <button id="startBtn">避難開始</button>
-  <div id="startSub" style="color:#ddd; max-width:80%; text-align:center; font-size:14px;">
-    タップしてセンサー（IMU）と音声再生を許可します。屋外での位置誤差が大きい場合は設定を調整してください。
-  </div>
-</div>
-
-<!-- turf.js (map matching helper) -->
-<script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
-
 <script>
-/*
-  改良版（ログ無し・KFリセットボタン無し・表示簡略）
-  - GPSジャンプ除去（歩行速度ベース）
-  - 4状態カルマン（N/E位置＋N/E速度）：IMUはpredict、GPSはupdate
-  - GPSのaccuracyを観測ノイズとして利用
-  - 静止検出（ZUPT）で速度ドリフト抑制
-  - roads.geojson によるマップスナップ
-*/
-
-/* ---------------- スポットデータ ---------------- */
+/* ---------------- スポット設定 ---------------- */
 const spots = [
-  { name: "図書館前スロープ", lat: 35.691968142452374, lon: 140.0507643569911, radius: 0, images: ["image0.jpeg", "image1.jpeg"], audio: { A: "spot1.ja.mp3", B: "spot1.en.mp3", C: "spot1.ch.mp3" } }, //スロープ前
-  { name: "１４号館前直進", lat: 35.69245264109913,  lon: 140.05086356956514, radius: 10, images: ["image1.jpeg", "image10.jpeg"], audio: { A: "spot2.ja.mp3", B: "spot2.en.mp3", C: "spot2.ch.mp3" } }, //排水溝の上
-  { name: "曲がり角左", lat:35.69283599175495,  lon:140.05092001888113, radius: 10, images: ["image2.jpeg", "image3.jpeg"], audio: { A: "spot3,4.ja.mp3", B: "spot3,4.en.mp3", C: "spot3,4.ch.mp3" } }, //道の色が変わるところ
-  { name: "曲がり角右１", lat: 35.692909781862724,  lon: 140.05024978654654, radius: 10, images: ["image4.jpeg", "image5.jpeg"], audio: { A: "spot3,4.ja.mp3", B: "spot3,4.en.mp3", C: "spot3,4.ch.mp3" } }, //13号館のちょうど角
-  { name: "曲がり角右２", lat: 35.69334894066289,  lon: 140.05033682451656, radius: 10, images: ["image6.jpeg", "image7.jpeg"], audio: { A: "spot5,6.ja.mp3", B: "spot5,6.en.mp3", C: "spot5,6.ch.mp3" } }, //13号館のちょうど角
-  { name: "曲がり角右３", lat: 35.69331981781718,  lon: 140.05102244720183, radius: 10, images: ["image8.jpeg", "image9.jpeg"], audio: { A: "spot5,6.ja.mp3", B: "spot5,6.en.mp3", C: "spot5,6.ch.mp3" } }, //階段の前の木
-  { name: "目的地", lat: 35.693014464267506,  lon: 140.0509410980045, radius: 10, images: ["image10.jpeg", "image11.jpeg"], audio: { A: "spot7,8.ja.mp3", B: "spot7,8.en.mp3", C: "spot7,8.ch.mp3" } } //T字線の交点
+  { name: "13号館前", lat: 35.69302425885399, lon: 140.0508424409975, radius: 0, images: ["image0.jpeg", "image1.jpeg"], audio: { A: "spot1.ja.mp3", B: "spot1.en.mp3", C: "spot1.ch.mp3" } },
+  { name: "曲がり角右", lat: 35.69283599175495, lon: 140.05092001888113, radius: 10, images: ["image3.jpeg", "image11.jpeg"], audio: { A: "spot3,4.ja.mp3", B: "spot3,4.en.mp3", C: "spot3,4.ch.mp3" } },
+  { name: "曲がり角右１", lat: 35.69286877921128, lon: 140.05030279528978, radius: 10, images: ["image4.jpeg", "image13.jpeg"], audio: { A: "spot3,4.ja.mp3", B: "spot3,4.en.mp3", C: "spot3,4.ch.mp3" } },
+  { name: "曲がり角右２", lat: 35.69334894066289, lon: 140.05033682451656, radius: 10, images: ["image5.jpeg", "image14.jpeg"], audio: { A: "spot5,6.ja.mp3", B: "spot5,6.en.mp3", C: "spot5,6.ch.mp3" } },
+  { name: "曲がり角右３", lat: 35.69331981781718, lon: 140.05102244720183, radius: 10, images: ["image6.jpeg", "image15.jpeg"], audio: { A: "spot5,6.ja.mp3", B: "spot5,6.en.mp3", C: "spot5,6.ch.mp3" } },
+  { name: "目的地", lat: 35.693014464267506, lon: 140.0509410980045, radius: 10, images: ["image7.jpeg", "image16.jpeg"], audio: { A: "spot7,8.ja.mp3", B: "spot7,8.en.mp3", C: "spot7,8.ch.mp3" } }
 ];
 
-/* ---------------- DOM ---------------- */
+let currentIndex = 0;
+let hasEnteredSpot = false;
+let currentSpot = null;
+let currentPattern = "A";
+let imageIndex = 0;
+let correction = { lat: 0, lon: 0 }; // ✅ 補正値格納用
+
 const camera = document.getElementById("camera");
 const info = document.getElementById("info");
 const image = document.getElementById("image");
-const patternBtn = document.getElementById("patternBtn");
 const nextBtn = document.getElementById("nextBtn");
+const patternBtn = document.getElementById("patternBtn");
+const audio = document.getElementById("audio");
 const prevBtn = document.getElementById("prevBtn");
 const nextImgBtn = document.getElementById("nextImgBtn");
-const audioEl = document.getElementById("audio");
-const startupOverlay = document.getElementById("startupOverlay");
-const startBtn = document.getElementById("startBtn");
-
-let currentIndex = 0;
-let currentSpot = null;
-let hasEnteredSpot = false;
-let currentPattern = "A";
-let imageIndex = 0;
 
 /* ---------------- カメラ起動 ---------------- */
-navigator.mediaDevices?.getUserMedia({ video: { facingMode: "environment" }, audio: false })
-  .then(s => camera.srcObject = s)
-  .catch(e => console.warn("カメラ取得失敗:", e));
+navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false })
+  .then(stream => camera.srcObject = stream)
+  .catch(err => alert("カメラへのアクセスに失敗しました: " + err));
 
-/* ---------------- roads.geojson 読込 ---------------- */
-let roadsGeoJSON = null;
-const roadsUrl = "demo.geojson";
-async function loadRoads() {
-  try {
-    const r = await fetch(roadsUrl);
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    roadsGeoJSON = await r.json();
-    console.log("roads loaded:", roadsGeoJSON.features?.length || 0);
-  } catch (e) {
-    console.warn("roads load failed:", e);
-    roadsGeoJSON = null;
-  }
-}
-loadRoads();
-
-function snapToRoad(lat, lon, thresholdMeters) {
-  if (!roadsGeoJSON) return { snapped:false, lat, lon, distanceToRoad: Infinity };
-  const pt = turf.point([lon, lat]);
-  let best = { distance: Infinity, point: null, feature:null };
-  for (const f of roadsGeoJSON.features) {
-    if (!f.geometry) continue;
-    try {
-      const snapped = turf.nearestPointOnLine(f, pt, { units: "meters" });
-      const d = snapped.properties?.dist ?? snapped.properties?.distance ?? (turf.distance(pt, snapped, { units: "kilometers" })*1000);
-      if (typeof d === "number" && d < best.distance) {
-        best.distance = d;
-        best.point = snapped;
-        best.feature = f;
-      }
-    } catch(e){ /* continue */ }
-  }
-  if (best.point && best.distance <= thresholdMeters) {
-    const [lon2, lat2] = best.point.geometry.coordinates;
-    return { snapped:true, lat:lat2, lon:lon2, distanceToRoad:best.distance, feature:best.feature };
-  } else {
-    return { snapped:false, lat, lon, distanceToRoad:best.distance };
-  }
-}
-
-/* ---------------- 緯度経度 <-> 局所メートル変換 ---------------- */
-let originLat = null, originLon = null;
-const metersPerDegLat = 111320;
-function metersPerDegLonAtLat(lat){ return 111320 * Math.cos(lat * Math.PI / 180); }
-function latLonToLocal(lat, lon) {
-  if (originLat === null) { originLat = lat; originLon = lon; }
-  const dy = (lat - originLat) * metersPerDegLat;
-  const dx = (lon - originLon) * metersPerDegLonAtLat((lat+originLat)/2);
-  return { x: dx, y: dy }; // x:east, y:north
-}
-function localToLatLon(y, x) {
-  const lat = originLat + (y / metersPerDegLat);
-  const lon = originLon + (x / metersPerDegLonAtLat(originLat));
-  return { lat, lon };
-}
-
-/* ---------------- 4-state Kalman Filter (n,e,vN,vE) - 軽量実装 ---------------- */
-class KF4 {
-  constructor() {
-    this.x = [0,0,0,0]; // n, e, vN, vE (meters, meters, m/s, m/s)
-    this.P = eye(4, 1e2);
-    this.Qbase = eye(4, 0.5); // process noise base
-    this.lastTs = null;
-  }
-  predict(aN, aE, dt) {
-    if (!dt || dt <= 0) return;
-    const n = this.x[0] + this.x[2]*dt + 0.5*aN*dt*dt;
-    const e = this.x[1] + this.x[3]*dt + 0.5*aE*dt*dt;
-    const vN = this.x[2] + aN*dt;
-    const vE = this.x[3] + aE*dt;
-    this.x = [n,e,vN,vE];
-    const F = [
-      [1,0,dt,0],
-      [0,1,0,dt],
-      [0,0,1,0],
-      [0,0,0,1]
-    ];
-    const Q = mulScalar(this.Qbase, dt);
-    this.P = addMat(mulMat(F, mulMat(this.P, transpose(F))), Q);
-  }
-  updatePos(n_meas, e_meas, Rpos) {
-    const H = [[1,0,0,0],[0,1,0,0]];
-    const z = [n_meas, e_meas];
-    const R = [[Rpos*Rpos,0],[0,Rpos*Rpos]];
-    const Hx = matVec(H, this.x);
-    const y = [z[0]-Hx[0], z[1]-Hx[1]];
-    const S = addMat(mulMat(H, mulMat(this.P, transpose(H))), R);
-    const K = mulMat(this.P, mulMat(transpose(H), inv2(S)));
-    const K_vec = matVec(K, y);
-    this.x = addVec(this.x, K_vec);
-    const I = eye(4,1);
-    const KH = mulMat(K, H);
-    this.P = mulMat(subMat(I, KH), this.P);
-  }
-  getState(){ return this.x.slice(); }
-  setState(x,P=null){ this.x = x.slice(); this.P = P ? P : eye(4,1e2); }
-  reset(){ this.x = [0,0,0,0]; this.P = eye(4,1e2); this.lastTs = null; originLat = originLon = null; }
-}
-
-/* --- matrix helpers (minimal) --- */
-function eye(n, diag=1){ const A=[]; for(let i=0;i<n;i++){ A[i]=Array(n).fill(0); A[i][i]=diag; } return A; }
-function transpose(A){ return A[0].map((_,i)=>A.map(r=>r[i])); }
-function mulMat(A,B){ const r=A.length,c=B[0].length,m=A[0].length; const C=[]; for(let i=0;i<r;i++){ C[i]=Array(c).fill(0); for(let k=0;k<m;k++){ for(let j=0;j<c;j++){ C[i][j]+=A[i][k]*B[k][j]; } } } return C; }
-function matVec(A,v){ const r=A.length,c=v.length; const out=Array(r).fill(0); for(let i=0;i<r;i++){ for(let j=0;j<c;j++){ out[i]+=A[i][j]*v[j]; } } return out; }
-function addMat(A,B){ return A.map((row,i)=>row.map((v,j)=>v + (B[i][j]||0))); }
-function subMat(A,B){ return A.map((row,i)=>row.map((v,j)=>v - (B[i][j]||0))); }
-function addVec(a,b){ return a.map((v,i)=>v + (b[i]||0)); }
-function mulScalar(A,s){ return A.map(row=>row.map(v=>v*s)); }
-function inv2(M){ const a=M[0][0], b=M[0][1], c=M[1][0], d=M[1][1]; const det = a*d - b*c; if (Math.abs(det) < 1e-9) return [[1e9,0],[0,1e9]]; const id = 1/det; return [[ d*id, -b*id], [-c*id, a*id]]; }
-
-/* ---------------- フィルタとIMU ---------------- */
-const kf = new KF4();
-let imuEnabled = false;
-let lastImuTs = null;
-let headingDeg = null;
-let lastGps = null; // {lat,lon,ts,accuracy}
-const MAX_IMU_INTEGRATION_MS = 20000;
-function enableIMU() {
-  if (imuEnabled) return Promise.resolve();
-  const perms = [];
-  if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") perms.push(DeviceMotionEvent.requestPermission());
-  if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") perms.push(DeviceOrientationEvent.requestPermission());
-  return Promise.all(perms.map(p=>p.catch(e=>e))).then(()=> {
-    window.addEventListener("devicemotion", onDeviceMotion, { passive:true });
-    window.addEventListener("deviceorientation", onDeviceOrientation, { passive:true });
-    imuEnabled = true;
-  }).catch(e => {
-    window.addEventListener("devicemotion", onDeviceMotion, { passive:true });
-    window.addEventListener("deviceorientation", onDeviceOrientation, { passive:true });
-    imuEnabled = true;
-  });
-}
-function onDeviceOrientation(e){ if (typeof e.webkitCompassHeading === "number") headingDeg = e.webkitCompassHeading; else if (typeof e.alpha === "number") headingDeg = e.alpha; else headingDeg = null; }
-let stationaryCounter = 0;
-function onDeviceMotion(e){
-  const now = Date.now();
-  if (!lastImuTs) lastImuTs = now;
-  const dt = Math.min(0.2, (now - lastImuTs)/1000);
-  lastImuTs = now;
-  if (!dt || dt <= 0) return;
-  const acc = e.acceleration && (e.acceleration.x !== null || e.acceleration.y !== null) ? e.acceleration : e.accelerationIncludingGravity;
-  if (!acc) return;
-  const forwardAccel = -(acc.y || 0);
-  const h = (typeof headingDeg === "number") ? (headingDeg * Math.PI / 180) : null;
-  let aN = 0, aE = 0;
-  if (h !== null) { aN = forwardAccel * Math.cos(h); aE = forwardAccel * Math.sin(h); }
-  else { aN = forwardAccel; aE = 0; }
-  const accNorm = Math.sqrt((acc.x||0)**2 + (acc.y||0)**2 + (acc.z||0)**2);
-  if (accNorm < 0.18) stationaryCounter++; else stationaryCounter = 0;
-  if (stationaryCounter > 6) { kf.x[2] = 0; kf.x[3] = 0; }
-  kf.predict(aN, aE, dt);
-  if (lastGps && (Date.now() - lastGps.ts) > MAX_IMU_INTEGRATION_MS) { kf.P[2][2] += 1.0; kf.P[3][3] += 1.0; }
-}
-
-/* ---------------- GPS ハンドラ（ジャンプ除去、fusion） ---------------- */
-const MAX_WALK_SPEED = 3.0;
-function onGpsPosition(pos) {
-  const rawLat = pos.coords.latitude;
-  const rawLon = pos.coords.longitude;
-  const accuracy = pos.coords.accuracy || 30;
-  const ts = pos.timestamp || Date.now();
-  if (originLat === null) { originLat = rawLat; originLon = rawLon; }
-  if (lastGps) {
-    const dt = Math.max(0.001, (ts - lastGps.ts) / 1000.0);
-    const jumpDist = haversine(rawLat, rawLon, lastGps.lat, lastGps.lon);
-    const allowed = MAX_WALK_SPEED * dt + Math.max(3, accuracy, lastGps.accuracy);
-    if (jumpDist > allowed * 2.5) {
-      console.warn("GPS spike rejected:", jumpDist.toFixed(1), "m dt=", dt.toFixed(2), "s acc=", accuracy.toFixed(1));
-      return;
-    }
-  }
-  const local = latLonToLocal(rawLat, rawLon);
-  const Rpos = Math.max(3, accuracy);
-  kf.updatePos(local.y, local.x, Rpos);
-  const snapThresh = Math.max(5, Math.min(25, accuracy * 1.5));
-  const state = kf.getState();
-  const stLatLon = localToLatLon(state[0], state[1]);
-  const snapRes = snapToRoad(stLatLon.lat, stLatLon.lon, snapThresh);
-  if (snapRes.snapped) {
-    const sLocal = latLonToLocal(snapRes.lat, snapRes.lon);
-    kf.updatePos(sLocal.y, sLocal.x, Math.max(2, accuracy*0.5));
-  }
-  lastGps = { lat: rawLat, lon: rawLon, ts, accuracy };
-  const s = kf.getState();
-  const usedLatLon = localToLatLon(s[0], s[1]);
-  updateInfo(usedLatLon.lat, usedLatLon.lon);
-}
-
-/* ---------------- 距離計算 (haversine) ---------------- */
-function haversine(lat1, lon1, lat2, lon2) {
+/* ---------------- 距離計算 ---------------- */
+function getDistance(lat1, lon1, lat2, lon2) {
   const R = 6371000;
-  const dLat = (lat2 - lat1) * Math.PI/180;
-  const dLon = (lon2 - lon1) * Math.PI/180;
-  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLon/2)**2;
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   return R * c;
 }
 
-/* ---------------- UI 表示・スポット判定（簡略化） ---------------- */
-function updateInfo(lat, lon) {
+/* ---------------- 位置補正QR読取 ---------------- */
+function applyCalibration(qrLat, qrLon, deviceLat, deviceLon) {
+  correction.lat = qrLat - deviceLat;
+  correction.lon = qrLon - deviceLon;
+  alert(`📍位置補正完了\nΔLat=${correction.lat.toFixed(6)}, ΔLon=${correction.lon.toFixed(6)}`);
+}
+
+/* ---------------- 現在地チェック ---------------- */
+function checkProximity(lat, lon) {
+  // ✅ 補正値を適用
+  const correctedLat = lat + correction.lat;
+  const correctedLon = lon + correction.lon;
+
   if (currentIndex >= spots.length) {
-    info.innerText = `すべてのスポットを通過しました。`;
+    info.innerText = "すべてのスポットを通過しました。";
     hideAllUI();
     return;
   }
   const spot = spots[currentIndex];
-  const dist = haversine(lat, lon, spot.lat, spot.lon);
+  const distance = getDistance(correctedLat, correctedLon, spot.lat, spot.lon);
   const range = spot.radius || 10;
+
   info.innerText =
-    `推定現在地: 緯度 ${lat.toFixed(6)}, 経度 ${lon.toFixed(6)}\n` +
-    `次のスポット: ${spot.name} (${currentIndex+1}/${spots.length})\n` +
-    `残り距離: ${dist.toFixed(1)} m`;
-  if (!hasEnteredSpot && dist < range) showSpot(spot);
+    `現在地（補正後）: 緯度 ${correctedLat.toFixed(6)}, 経度 ${correctedLon.toFixed(6)}\n` +
+    `次のスポット: ${spot.name}（${currentIndex + 1} / ${spots.length}）\n` +
+    `残り距離: ${distance.toFixed(1)}m`;
+
+  if (currentIndex >= 1 && !hasEnteredSpot && distance < range) {
+    showSpot(spot);
+  }
 }
 
+/* ---------------- スポット表示 ---------------- */
 function showSpot(spot) {
-  currentSpot = spot; hasEnteredSpot = true; imageIndex = 0;
-  audioEl.src = spot.audio[currentPattern];
+  currentSpot = spot;
+  hasEnteredSpot = true;
+  imageIndex = 0;
+
+  audio.src = spot.audio[currentPattern];
   image.src = spot.images[imageIndex];
   image.style.display = "block";
   nextBtn.style.display = "block";
   patternBtn.style.display = "block";
   prevBtn.style.display = spot.images.length > 1 ? "block" : "none";
   nextImgBtn.style.display = spot.images.length > 1 ? "block" : "none";
-  audioEl.loop = true;
-  audioEl.play().catch(e => console.log("audio play fail:", e));
+
+  audio.loop = true;
+  audio.play().catch(e => console.log("自動再生に失敗:", e));
 }
+
+/* ---------------- 言語切替 ---------------- */
+function switchPattern() {
+  const patterns = ["A", "B", "C"];
+  const index = patterns.indexOf(currentPattern);
+  currentPattern = patterns[(index + 1) % patterns.length];
+  updatePatternButtonText();
+
+  if (currentSpot) {
+    audio.pause();
+    audio.src = currentSpot.audio[currentPattern];
+    audio.play().catch(e => console.log("自動再生に失敗:", e));
+  }
+}
+
+function updatePatternButtonText() {
+  let label = "";
+  switch (currentPattern) {
+    case "A": label = "English"; break;
+    case "B": label = "中文"; break;
+    case "C": label = "日本語"; break;
+  }
+  patternBtn.innerText = label;
+}
+
+/* ---------------- 画像切替 ---------------- */
+function showPrevImage() {
+  if (!currentSpot) return;
+  imageIndex = (imageIndex - 1 + currentSpot.images.length) % currentSpot.images.length;
+  image.src = currentSpot.images[imageIndex];
+}
+function showNextImage() {
+  if (!currentSpot) return;
+  imageIndex = (imageIndex + 1) % currentSpot.images.length;
+  image.src = currentSpot.images[imageIndex];
+}
+
+/* ---------------- スポット進行 ---------------- */
 function goToNextSpot() {
-  audioEl.pause();
+  audio.pause();
   currentIndex++;
   hasEnteredSpot = false;
   currentSpot = null;
   hideAllUI();
 }
+
+/* ---------------- UI制御 ---------------- */
 function hideAllUI() {
   image.style.display = "none";
   nextBtn.style.display = "none";
@@ -326,45 +173,31 @@ function hideAllUI() {
   prevBtn.style.display = "none";
   nextImgBtn.style.display = "none";
 }
-function switchPattern() {
-  const patterns = ["A","B","C"];
-  const i = patterns.indexOf(currentPattern);
-  currentPattern = patterns[(i+1)%patterns.length];
-  patternBtn.innerText = currentPattern === "A" ? "English" : (currentPattern === "B" ? "中文" : "日本語");
-  if (currentSpot) { audioEl.pause(); audioEl.src = currentSpot.audio[currentPattern]; audioEl.play().catch(()=>{}); }
-}
-function showPrevImage() { if (!currentSpot) return; imageIndex = (imageIndex - 1 + currentSpot.images.length) % currentSpot.images.length; image.src = currentSpot.images[imageIndex]; }
-function showNextImage() { if (!currentSpot) return; imageIndex = (imageIndex + 1) % currentSpot.images.length; image.src = currentSpot.images[imageIndex]; }
 
 /* ---------------- 位置取得開始 ---------------- */
 if ("geolocation" in navigator) {
-  const options = { enableHighAccuracy:true, maximumAge:0, timeout:15000 };
   navigator.geolocation.watchPosition(
-    pos => onGpsPosition(pos),
-    err => info.innerText = "位置情報取得エラー: " + err.message,
-    options
+    pos => checkProximity(pos.coords.latitude, pos.coords.longitude),
+    err => info.innerText = "位置情報の取得に失敗しました",
+    { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
   );
-} else {
-  info.innerText = "このブラウザは位置情報に対応していません。";
 }
 
-/* ---------------- 起動ボタン処理 ---------------- */
-let userStarted = false;
-startBtn.addEventListener("click", async () => {
-  if (userStarted) return;
-  userStarted = true;
-  startupOverlay.style.display = "none";
-  startupOverlay.setAttribute("aria-hidden","true");
-  try { const AudioCtx = window.AudioContext || window.webkitAudioContext; if (AudioCtx) { const ctx = new AudioCtx(); if (ctx.state === "suspended") await ctx.resume().catch(()=>{}); } } catch(e){}
-  try { await enableIMU(); } catch(e){ console.warn("enableIMU failed:", e); }
-  try { showSpot(spots[0]); } catch(e){ console.warn("showSpot failed", e); }
-});
+/* ---------------- 起動時処理 ---------------- */
+window.onload = () => {
+  showSpot(spots[0]);
+  updatePatternButtonText();
 
-/* ---------------- 初期表示 ---------------- */
-window.addEventListener("load", () => {
-  patternBtn.innerText = "English";
-});
+  // ✅ URLからQR座標パラメータを取得して補正
+  const params = new URLSearchParams(window.location.search);
+  const qrLat = parseFloat(params.get("lat"));
+  const qrLon = parseFloat(params.get("lon"));
+  if (qrLat && qrLon) {
+    navigator.geolocation.getCurrentPosition(pos => {
+      applyCalibration(qrLat, qrLon, pos.coords.latitude, pos.coords.longitude);
+    });
+  }
+};
 </script>
 </body>
 </html>
-
