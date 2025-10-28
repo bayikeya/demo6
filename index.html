@@ -1,339 +1,181 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>QR基準・IMU推定：避難誘導（自動音声）</title>
+  <meta charset="UTF-8" />
+  <title>複数画像切替付きスポット案内（自動音声版）</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
-    :root{--ui-bg:rgba(0,0,0,0.6);--btn:#007bff}
-    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,Arial;color:#fff;background:#000}
-    #camera{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:0}
-    #panel{position:fixed;left:12px;top:12px;background:var(--ui-bg);padding:12px;border-radius:8px;z-index:3;max-width:calc(100% - 24px)}
-    #centerUI{position:fixed;left:50%;transform:translateX(-50%);bottom:20px;z-index:3;text-align:center}
-    .btn{background:var(--btn);color:#fff;padding:10px 14px;border-radius:8px;border:0;cursor:pointer;margin:4px}
-    .small{font-size:13px;padding:6px 8px}
-    #image{position:fixed;left:50%;transform:translateX(-50%);bottom:120px;width:300px;height:300px;object-fit:contain;display:none;z-index:2;background:#000}
-    .img-nav{position:fixed;bottom:260px;font-size:20px;background:var(--ui-bg);color:#fff;border:none;padding:6px 12px;border-radius:6px;z-index:3}
-    #prevBtn{left:6%} #nextImgBtn{right:6%}
-    pre{white-space:pre-wrap;margin:0}
-    input[type=number]{width:140px;padding:6px;border-radius:6px;border:1px solid #444;background:transparent;color:#fff}
-    label{font-size:13px}
+    body { margin: 0; overflow: hidden; background-color: #000; color: white; font-family: sans-serif; text-align: center; }
+    #camera { width: 100vw; height: 100vh; object-fit: cover; position: absolute; top: 0; left: 0; z-index: -1; }
+    #info { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 8px; z-index: 1; white-space: pre-wrap; }
+    #image { position: absolute; bottom: 180px; left: 50%; transform: translateX(-50%); width: 300px; height: 300px; object-fit: contain; display: none; z-index: 1; background: black; }
+    .btn { position: absolute; left: 50%; transform: translateX(-50%); background-color: #007BFF; color: white; border: none; padding: 10px 20px; font-size: 14px; border-radius: 8px; cursor: pointer; z-index: 2; display: none; }
+    #patternBtn { bottom: 70px; }
+    #nextBtn { bottom: 20px; }
+    .img-nav { position: absolute; bottom: 260px; z-index: 2; font-size: 20px; background: rgba(0,0,0,0.5); color: white; border: none; padding: 5px 15px; cursor: pointer; border-radius: 6px; }
+    #prevBtn { left: 10%; }
+    #nextImgBtn { right: 10%; }
   </style>
 </head>
 <body>
-  <video id="camera" autoplay playsinline muted></video>
-  <div id="panel">
-    <div style="font-weight:700;margin-bottom:6px">避難誘導デモ（QR基準＋IMU推定）</div>
-    <div id="status">状態: 起動待ち</div>
-    <div id="coords">基準: 未設定</div>
-    <div style="margin-top:8px">
-      <button class="btn small" id="scanQrBtn">QRをカメラで読み取る（推奨）</button>
-      <button class="btn small" id="manualBtn">手動で座標入力</button>
-      <button class="btn small" id="recalBtn">再キャリブレーション</button>
-    </div>
-    <div style="margin-top:8px">
-      <label>歩行推定モード: </label>
-      <select id="modeSelect">
-        <option value="speed">固定速度（デフォルト）</option>
-        <option value="step">歩数検出（加速度）</option>
-      </select>
-      <label style="margin-left:8px">速度(m/s): </label>
-      <input id="speedInput" type="number" step="0.1" value="1.2">
-    </div>
-    <div style="margin-top:8px">
-      <label>方位（デバイス）: </label><span id="heading">取得待ち</span>
-    </div>
-    <div style="margin-top:6px">
-      <details style="color:#fff"><summary>デバッグ情報</summary>
-        <pre id="debug"></pre>
-      </details>
-    </div>
-  </div>
 
-  <img id="image" alt="スポット画像">
-  <button class="img-nav" id="prevBtn" style="display:none">←</button>
-  <button class="img-nav" id="nextImgBtn" style="display:none">→</button>
+<video id="camera" autoplay playsinline muted></video>
+<div id="info">位置情報取得中...</div>
+<img id="image" src="" alt="スポット画像" />
+<button class="btn" id="patternBtn" onclick="switchPattern()">English</button>
+<button class="btn" id="nextBtn" onclick="goToNextSpot()">このスポットは完了</button>
+<button class="img-nav" id="prevBtn" onclick="showPrevImage()" style="display:none;">←</button>
+<button class="img-nav" id="nextImgBtn" onclick="showNextImage()" style="display:none;">→</button>
+<audio id="audio" src=""></audio>
 
-  <div id="centerUI">
-    <div id="infoBox" style="background:var(--ui-bg);padding:10px;border-radius:8px;max-width:92vw">
-      <div id="info">起動しています...</div>
-      <div style="margin-top:8px">
-        <button class="btn" id="nextSpotBtn">このスポットは完了</button>
-        <button class="btn" id="toggleAudio">音声ON/OFF</button>
-      </div>
-    </div>
-  </div>
+<script>
+const spots = [
+  { name: "13号館前", lat: 35.69302425885399, lon: 140.0508424409975, radius: 0, images: ["image0.jpeg", "image1.jpeg"], audio: { A: "spot1.ja.mp3", B: "spot1.en.mp3", C: "spot1.ch.mp3" } }, //スロープ前
+  { name: "曲がり角右", lat:35.69283599175495,  lon:140.05092001888113, radius: 10, images: ["image3.jpeg", "image11.jpeg"], audio: { A: "spot3,4.ja.mp3", B: "spot3,4.en.mp3", C: "spot3,4.ch.mp3" } }, //道の色が変わるところ
+  { name: "曲がり角右１", lat: 35.69286877921128,   lon: 140.05030279528978, radius: 10, images: ["image4.jpeg", "image13.jpeg"], audio: { A: "spot3,4.ja.mp3", B: "spot3,4.en.mp3", C: "spot3,4.ch.mp3" } }, //13号館向かいの倉庫？のちょうど角
+  { name: "曲がり角右２", lat: 35.69334894066289,  lon: 140.05033682451656, radius: 10, images: ["image5.jpeg", "image14.jpeg"], audio: { A: "spot5,6.ja.mp3", B: "spot5,6.en.mp3", C: "spot5,6.ch.mp3" } }, //13号館のちょうど角
+  { name: "曲がり角右３", lat: 35.69331981781718,  lon: 140.05102244720183, radius: 10, images: ["image6.jpeg", "image15.jpeg"], audio: { A: "spot5,6.ja.mp3", B: "spot5,6.en.mp3", C: "spot5,6.ch.mp3" } }, //階段の前の木
+  { name: "目的地", lat: 35.693014464267506,  lon: 140.0509410980045, radius: 10, images: ["image7.jpeg", "image16.jpeg"], audio: { A: "spot7,8.ja.mp3", B: "spot7,8.en.mp3", C: "spot7,8.ch.mp3" } } //T字線の交点
+];
 
-  <audio id="audio" loop></audio>
+let currentIndex = 0;
+let hasEnteredSpot = false;
+let currentSpot = null;
+let currentPattern = "A";
+let imageIndex = 0;
 
-  <script>
-  /* ===================== スポット（サンプル） ===================== */
-  const spots = [
-    { name: "13号館前", lat: 35.69302425885399, lon: 140.0508424409975, radius: 0, images: ["image0.jpeg","image1.jpeg"], audio: { A: "spot1.ja.mp3", B: "spot1.en.mp3", C: "spot1.ch.mp3" } },
-    { name: "曲がり角右", lat: 35.69283599175495, lon: 140.05092001888113, radius: 10, images: ["image3.jpeg","image11.jpeg"], audio: { A: "spot3,4.ja.mp3" } },
-    { name: "曲がり角右１", lat: 35.69286877921128, lon: 140.05030279528978, radius: 10, images: ["image4.jpeg","image13.jpeg"], audio: { A: "spot3,4.ja.mp3" } },
-    { name: "曲がり角右２", lat: 35.69334894066289, lon: 140.05033682451656, radius: 10, images: ["image5.jpeg","image14.jpeg"], audio: { A: "spot5,6.ja.mp3" } },
-    { name: "曲がり角右３", lat: 35.69331981781718, lon: 140.05102244720183, radius: 10, images: ["image6.jpeg","image15.jpeg"], audio: { A: "spot5,6.ja.mp3" } },
-    { name: "目的地", lat: 35.693014464267506, lon: 140.0509410980045, radius: 10, images: ["image7.jpeg","image16.jpeg"], audio: { A: "spot7,8.ja.mp3" } }
-  ];
+const camera = document.getElementById("camera");
+const info = document.getElementById("info");
+const image = document.getElementById("image");
+const nextBtn = document.getElementById("nextBtn");
+const patternBtn = document.getElementById("patternBtn");
+const audio = document.getElementById("audio");
+const prevBtn = document.getElementById("prevBtn");
+const nextImgBtn = document.getElementById("nextImgBtn");
 
-  /* ===================== 変数 ===================== */
-  let baseLat = null, baseLon = null;        // QRで得た基準
-  let virtualLat = null, virtualLon = null;  // 仮想座標（基準からの推定）
-  let currentIndex = 0;
-  let hasEnteredSpot = false;
-  let currentHeading = 0; // 0..360
-  let useAbsolute = false; // deviceorientationabsolute
+/* ---------------- カメラ起動 ---------------- */
+navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false })
+  .then(stream => camera.srcObject = stream)
+  .catch(err => alert("カメラへのアクセスに失敗しました: " + err));
 
-  const camera = document.getElementById('camera');
-  const statusEl = document.getElementById('status');
-  const coordsEl = document.getElementById('coords');
-  const debugEl = document.getElementById('debug');
-  const headingEl = document.getElementById('heading');
-  const infoEl = document.getElementById('info');
-  const imageEl = document.getElementById('image');
-  const prevBtn = document.getElementById('prevBtn');
-  const nextImgBtn = document.getElementById('nextImgBtn');
-  const audioEl = document.getElementById('audio');
+  /* ---------------- 距離計算（haversine） ---------------- */
+function getDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLon/2)**2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
 
-  let imageIndex = 0;
-  let currentSpot = null;
-  let mode = 'speed';
-  let fixedSpeed = parseFloat(document.getElementById('speedInput').value) || 1.2; // m/s
-
-  /* ===================== カメラ起動 ===================== */
-  async function startCamera() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
-      camera.srcObject = stream;
-      statusEl.innerText = 'カメラ起動中';
-    } catch (e) {
-      statusEl.innerText = 'カメラが使えません: ' + e.message;
-    }
+/* ---------------- スポット判定 ---------------- */
+function checkProximity(lat, lon) {
+  if (currentIndex >= spots.length) {
+    info.innerText = "すべてのスポットを通過しました。";
+    hideAllUI();
+    return;
   }
-  startCamera();
+  const spot = spots[currentIndex];
+  const distance = getDistance(lat, lon, spot.lat, spot.lon);
+  const range = spot.radius || 10;
 
-  /* ===================== QR読み取り（BarcodeDetector使用） ===================== */
-  let scanning = false;
-  async function scanQRCodeOnce() {
-    if (!('BarcodeDetector' in window)) {
-      alert('このブラウザはBarcodeDetectorをサポートしていません。URLパラメータか手動入力を使ってください。');
-      return;
-    }
-    const formats = ['qr_code'];
-    const detector = new BarcodeDetector({formats});
-    scanning = true;
-    statusEl.innerText = 'QR読み取り: カメラにQRをかざしてください';
-    const track = camera.srcObject?.getVideoTracks()[0];
-    const imageCapture = new ImageCapture(track);
-    // 3秒間ポーリング
-    const deadline = Date.now() + 8000;
-    while (Date.now() < deadline && scanning) {
-      try {
-        const bitmap = await imageCapture.grabFrame();
-        const canvas = document.createElement('canvas');
-        canvas.width = bitmap.width; canvas.height = bitmap.height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(bitmap,0,0);
-        const results = await detector.detect(canvas);
-        if (results && results.length) {
-          const raw = results[0].rawValue;
-          handleQrPayload(raw);
-          scanning = false;
-          statusEl.innerText = 'QR読み取り成功';
-          return;
-        }
-      } catch (e) {
-        console.warn('scan err', e);
-      }
-      await new Promise(r=>setTimeout(r,300));
-    }
-    if (scanning) {
-      scanning = false;
-      statusEl.innerText = 'QR読み取りタイムアウト';
-    }
+  info.innerText =
+    `現在地: 緯度 ${lat.toFixed(6)}, 経度 ${lon.toFixed(6)}\n` +
+    `次のスポット: ${spot.name}（${currentIndex + 1} / ${spots.length}）\n` +
+    `残り距離: ${distance.toFixed(1)}m`;
+
+  if (currentIndex >= 1 && !hasEnteredSpot && distance < range) {
+    showSpot(spot);
   }
+}
 
-  function handleQrPayload(raw) {
-    // 期待する形式: lat=..&lon=..
-    try {
-      const p = new URLSearchParams(raw.split('?')[1] || raw);
-      const lat = parseFloat(p.get('lat'));
-      const lon = parseFloat(p.get('lon'));
-      if (!isNaN(lat) && !isNaN(lon)) {
-        applyCalibration(lat, lon);
-        return;
-      }
-      alert('QRに座標が見つかりません。URLにlat=..&lon=..が含まれている必要があります。');
-    } catch (e) {
-      alert('QRパース失敗');
-    }
+/* ---------------- スポット表示 ---------------- */
+function showSpot(spot) {
+  currentSpot = spot;
+  hasEnteredSpot = true;
+  imageIndex = 0;
+
+  audio.src = spot.audio[currentPattern];
+  image.src = spot.images[imageIndex];
+  image.style.display = "block";
+  nextBtn.style.display = "block";
+  patternBtn.style.display = "block";
+  prevBtn.style.display = spot.images.length > 1 ? "block" : "none";
+  nextImgBtn.style.display = spot.images.length > 1 ? "block" : "none";
+
+  // ✅ 自動再生 & ループ
+  audio.loop = true;
+  audio.play().catch(e => console.log("自動再生に失敗:", e));
+}
+
+/* ---------------- 音声パターン切替 ---------------- */
+function switchPattern() {
+  const patterns = ["A", "B", "C"];
+  const index = patterns.indexOf(currentPattern);
+  currentPattern = patterns[(index + 1) % patterns.length];
+  updatePatternButtonText();
+
+  if (currentSpot) {
+    audio.pause();
+    audio.src = currentSpot.audio[currentPattern];
+    audio.play().catch(e => console.log("自動再生に失敗:", e));
   }
+}
 
-  document.getElementById('scanQrBtn').addEventListener('click', ()=>scanQRCodeOnce());
-
-  /* ===================== 手動入力ダイアログ ===================== */
-  document.getElementById('manualBtn').addEventListener('click', ()=>{
-    const lat = parseFloat(prompt('基準緯度を入力してください（例: 35.6930242588）'));
-    const lon = parseFloat(prompt('基準経度を入力してください（例: 140.0508424409）'));
-    if (!isNaN(lat) && !isNaN(lon)) applyCalibration(lat, lon);
-  });
-
-  document.getElementById('recalBtn').addEventListener('click', ()=>{
-    // 再キャリブレーションは再スキャンを促す
-    scanQRCodeOnce();
-  });
-
-  /* ===================== キャリブレーション適用 ===================== */
-  function applyCalibration(lat, lon) {
-    baseLat = lat; baseLon = lon;
-    virtualLat = baseLat; virtualLon = baseLon;
-    coordsEl.innerText = `基準: ${baseLat.toFixed(6)}, ${baseLon.toFixed(6)}`;
-    statusEl.innerText = '基準座標セット';
-    logDebug('calib', `baseLat=${baseLat}, baseLon=${baseLon}`);
-    // 初期スポットを表示
-    showSpot(spots[0]);
+function updatePatternButtonText() {
+  let label = "";
+  switch (currentPattern) {
+    case "A": label = "English"; break;
+    case "B": label = "中文"; break;
+    case "C": label = "日本語"; break;
   }
+  patternBtn.innerText = label;
+}
 
-  /* ===================== 方位取得 ===================== */
-  function handleOrientation(e) {
-    // absoluteが使えるか試す
-    if (e.absolute === true) useAbsolute = true;
-    const alpha = e.alpha; // 0..360, device's z-axis rotation (compass-like)
-    if (alpha != null) {
-      // ブラウザによって回転方向や基準が違うので簡易的に変換
-      currentHeading = (360 - alpha) % 360; // 北を0とする
-      headingEl.innerText = currentHeading.toFixed(0) + '°';
-      logDebug('heading', currentHeading.toFixed(2));
-    }
-  }
+/* ---------------- 画像切替 ---------------- */
+function showPrevImage() {
+  if (!currentSpot) return;
+  imageIndex = (imageIndex - 1 + currentSpot.images.length) % currentSpot.images.length;
+  image.src = currentSpot.images[imageIndex];
+}
 
-  if ('ondeviceorientationabsolute' in window) {
-    window.addEventListener('deviceorientationabsolute', handleOrientation, true);
-  } else if ('ondeviceorientation' in window) {
-    window.addEventListener('deviceorientation', handleOrientation, true);
-  } else {
-    headingEl.innerText = '非対応';
-  }
+function showNextImage() {
+  if (!currentSpot) return;
+  imageIndex = (imageIndex + 1) % currentSpot.images.length;
+  image.src = currentSpot.images[imageIndex];
+}
 
-  /* ===================== 歩数検出（単純ピーク検出） ===================== */
-  let lastAcc = 0; let stepCount = 0; let accBuffer = [];
-  const STEP_THRESHOLD = 1.2; // 調整可
-  const STEP_LENGTH = 0.7; // 1歩当たりm（調整可）
-  function handleMotion(e) {
-    if (mode !== 'step') return;
-    const a = e.accelerationIncludingGravity;
-    if (!a) return;
-    const mag = Math.sqrt((a.x||0)**2 + (a.y||0)**2 + (a.z||0)**2);
-    accBuffer.push(mag);
-    if (accBuffer.length > 6) accBuffer.shift();
-    const avg = accBuffer.reduce((s,v)=>s+v,0)/accBuffer.length;
-    // 簡易ピーク
-    if (mag - avg > STEP_THRESHOLD && lastAcc - avg <= STEP_THRESHOLD) {
-      stepCount++;
-      logDebug('step', 'steps=' + stepCount);
-      // 1歩ごとに仮想位置更新（即時）
-      const rad = currentHeading * Math.PI / 180;
-      const d = STEP_LENGTH; // m
-      virtualLat += d * 0.00000899 * Math.cos(rad);
-      virtualLon += d * 0.00000899 * Math.sin(rad) / Math.cos(baseLat * Math.PI / 180);
-      checkProximity(virtualLat, virtualLon);
-    }
-    lastAcc = mag;
-  }
-  window.addEventListener('devicemotion', handleMotion, true);
+/* ---------------- 次のスポットへ ---------------- */
+function goToNextSpot() {
+  audio.pause();
+  currentIndex++;
+  hasEnteredSpot = false;
+  currentSpot = null;
+  hideAllUI();
+}
 
-  /* ===================== 仮想位置の定期更新（固定速度モード） ===================== */
-  let lastUpdate = Date.now();
-  setInterval(()=>{
-    mode = document.getElementById('modeSelect').value;
-    fixedSpeed = parseFloat(document.getElementById('speedInput').value) || 1.2;
-    if (!baseLat) return;
-    const now = Date.now();
-    const dt = (now - lastUpdate)/1000; if (dt <= 0) return; lastUpdate = now;
-    if (mode === 'speed') {
-      // 固定速度で更新
-      const d = fixedSpeed * dt; // m
-      const rad = currentHeading * Math.PI / 180;
-      virtualLat += d * 0.00000899 * Math.cos(rad);
-      virtualLon += d * 0.00000899 * Math.sin(rad) / Math.cos(baseLat * Math.PI / 180);
-      checkProximity(virtualLat, virtualLon);
-    }
-  }, 300);
+/* ---------------- UI 非表示 ---------------- */
+function hideAllUI() {
+  image.style.display = "none";
+  nextBtn.style.display = "none";
+  patternBtn.style.display = "none";
+  prevBtn.style.display = "none";
+  nextImgBtn.style.display = "none";
+}
 
-  /* ===================== 距離計算（haversine） ===================== */
-  function getDistance(lat1, lon1, lat2, lon2) {
-    const R = 6371000;
-    const dLat = (lat2 - lat1) * Math.PI/180;
-    const dLon = (lon2 - lon1) * Math.PI/180;
-    const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    return R * c;
-  }
+if ("geolocation" in navigator) {
+  navigator.geolocation.watchPosition(
+    pos => checkProximity(pos.coords.latitude, pos.coords.longitude),
+    err => info.innerText = "位置情報の取得に失敗しました",
+    { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+  );
+}
 
-  /* ===================== スポット判定・表示 ===================== */
-  function checkProximity(lat, lon) {
-    if (currentIndex >= spots.length) {
-      infoEl.innerText = 'すべてのスポットを通過しました。';
-      return;
-    }
-    const spot = spots[currentIndex];
-    const distance = getDistance(lat, lon, spot.lat, spot.lon);
-    infoEl.innerText = `現在地（仮想）: ${lat.toFixed(6)}, ${lon.toFixed(6)}\n次: ${spot.name} (${currentIndex+1}/${spots.length})\n残り: ${distance.toFixed(1)} m`;
-    logDebug('pos', `virt=${lat.toFixed(6)},${lon.toFixed(6)} dist=${distance.toFixed(2)}`);
-    if (!hasEnteredSpot && distance <= (spot.radius || 10)) {
-      showSpot(spot);
-    }
-  }
+window.onload = () => {
+  showSpot(spots[0]); // 起動時に最初のスポットを表示
+  updatePatternButtonText();
+};
+</script>
 
-  function showSpot(spot) {
-    currentSpot = spot; hasEnteredSpot = true;
-    imageIndex = 0; imageEl.src = spot.images[imageIndex]; imageEl.style.display = 'block';
-    prevBtn.style.display = spot.images.length > 1 ? 'block' : 'none';
-    nextImgBtn.style.display = spot.images.length > 1 ? 'block' : 'none';
-    // 音声
-    if (spot.audio && spot.audio.A) {
-      audioEl.src = spot.audio.A; // 今回は言語固定。必要なら切替UI追加
-      audioEl.play().catch(e=>console.log('autoplay err', e));
-    }
-  }
-
-  document.getElementById('nextSpotBtn').addEventListener('click', ()=>{
-    audioEl.pause(); currentIndex++; hasEnteredSpot=false; currentSpot=null; imageEl.style.display='none';
-    if (currentIndex >= spots.length) infoEl.innerText = '全スポット通過';
-    else infoEl.innerText = '次のスポットへ進みます。';
-  });
-
-  document.getElementById('toggleAudio').addEventListener('click', ()=>{
-    if (audioEl.paused) audioEl.play().catch(()=>{}); else audioEl.pause();
-  });
-
-  prevBtn.addEventListener('click', ()=>{
-    if (!currentSpot) return; imageIndex = (imageIndex -1 + currentSpot.images.length)%currentSpot.images.length; imageEl.src = currentSpot.images[imageIndex];
-  });
-  nextImgBtn.addEventListener('click', ()=>{
-    if (!currentSpot) return; imageIndex = (imageIndex +1)%currentSpot.images.length; imageEl.src = currentSpot.images[imageIndex];
-  });
-
-  /* ===================== デバッグロギング ===================== */
-  function logDebug(k,v){
-    const time = new Date().toLocaleTimeString();
-    debugEl.innerText = `[${time}] ${k}: ${v}\n` + debugEl.innerText.slice(0,2000);
-  }
-
-  /* ===================== URLパラメータからの自動キャリブレーション ===================== */
-  window.addEventListener('load', ()=>{
-    const params = new URLSearchParams(window.location.search);
-    const lat = parseFloat(params.get('lat'));
-    const lon = parseFloat(params.get('lon'));
-    if (!isNaN(lat) && !isNaN(lon)) {
-      applyCalibration(lat, lon);
-    }
-    statusEl.innerText = '起動完了';
-  });
-
-  /* ===================== 注意書き ===================== */
-  logDebug('note','このデモは基準座標を起点にIMU推定で仮想移動しています。実環境では磁気干渉や歩幅差で誤差が蓄積します。中間にQRで再キャリブレーションを置くことを推奨します。');
-  </script>
 </body>
 </html>
